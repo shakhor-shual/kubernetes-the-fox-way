@@ -1,0 +1,31 @@
+#!/bin/bash
+##############################################################################
+# This file is part of CW4D toolkit. it SETUP K8s CLUSTER IN RAW MODE
+# ("Kubernetes Hard Way" Like)
+# Copyright (C) Vadym Yanik 2024
+#
+# CW4D is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3  of the License, or (at your option) any
+# later version
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; # without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+# more details.
+#
+# You should have received a copy of the GNU General Public License  along
+# with this program; If not, see <http://www.gnu.org/licenses/>.
+###############################################################################
+if [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ]; then
+    THIS_HOST=$(hostname -s)
+    if [[ "$THIS_HOST" =~ $1 ]]; then
+        DEVICE=$(ip route | grep default | awk '{print $5}')
+        [ -z "$DEVICE" ] && exit 0
+        sudo iptables -A PREROUTING -t nat -i "$DEVICE" -p tcp --dport "$2" -j REDIRECT --to-port "$3"
+
+        #sudo iptables -A PREROUTING -t nat -i $DEVICE -p tcp --dport 443 -j REDIRECT --to-port $HTTPS
+        #sudo iptables -t nat -I OUTPUT -p tcp -o lo --dport $2 -j REDIRECT --to-ports $3
+        #sudo iptables -t nat -I OUTPUT -p tcp -o lo --dport 443 -j REDIRECT --to-ports $HTTPS
+    fi
+fi

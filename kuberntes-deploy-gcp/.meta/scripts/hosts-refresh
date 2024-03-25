@@ -1,0 +1,121 @@
+#!/bin/bash
+##############################################################################
+# This file is part of CW4D toolkit. it SETUP K8s CLUSTER IN RAW MODE
+# ("Kubernetes Hard Way" Like)
+# Copyright (C) Vadym Yanik 2024
+#
+# CW4D is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3  of the License, or (at your option) any
+# later version
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; # without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+# more details.
+#
+# You should have received a copy of the GNU General Public License  along
+# with this program; If not, see <http://www.gnu.org/licenses/>.
+###############################################################################
+ETC=/usr/local/etc
+HINT="#=====UPDATED===="
+SSH_MODE="-o StrictHostKeyChecking=no"
+SUBNETS=$(sed <"$ETC"/subnets.list.cidr 's/,/ /g' | head -n 1)
+LB_IP=$(head <"$ETC"/load.balancer.ip -n 1)
+SSH_USER=$(head <"$ETC"/default.user -n 1)
+CLOUD_NFS_IP=$(head <"$ETC"/network.ip.cloudnfs -n 1)
+NFS_CNAME="pv_volumes.nfs storage.nfs"
+
+check_hosts_rise() {
+   local hosts="/etc/hosts"
+   grep <"$hosts" -q "master-" || return 1
+   grep <"$hosts" -q "node-" || return 1
+   grep <"$hosts" -q "bastion" || return 1
+   return 0
+}
+
+patch_windows_hosts_file() {
+   #====== for Windows hosts file beyond WSL
+   local hosts="/mnt/c/Windows/System32/drivers/etc/hosts"
+   local hosts_tmp
+
+   if [ -f "${hosts}" ]; then
+      if stat -c "%A" $hosts | grep -q 'rw.$'; then
+         hosts_tmp=$(mktemp)
+         cp -f $hosts "$hosts_tmp"
+         sed "/${1}/d" "$hosts_tmp" | tee $hosts >/dev/null 2>&1
+         rm -f "$hosts_tmp"
+         if [ -n "$2" ]; then
+            cp -f $hosts "$hosts_tmp"
+            sed "/${2}/d" "$hosts_tmp" | tee $hosts >/dev/null 2>&1
+            rm -f "$hosts_tmp"
+            echo "$1 $2 $3 $4" >>$hosts
+
+         else
+            echo "WSL users can't write to Windows hosts file!!!"
+            echo "on WSL path: ${hosts}"
+            echo "setup needful access rights to it in  Windows!"
+         fi
+      fi
+   fi
+}
+
+patch_linux_hosts_file() {
+   #======= for any linux hosts file
+   local hosts="/etc/hosts"
+   local hosts_tmp
+   hosts_tmp=$(mktemp)
+   sudo chmod 666 $hosts
+   cp -f "$hosts" "$hosts_tmp"
+   sed "/${1}/d" "$hosts_tmp" | tee "$hosts" >/dev/null 2>&1
+   rm -f "$hosts_tmp"
+   if [ -n "$2" ]; then
+      cp -f $hosts "$hosts_tmp"
+      sed "/${2}/d" "$hosts_tmp" | tee "$hosts" >/dev/null 2>&1
+      rm -f "$hosts_tmp"
+      echo "$1 $2 $3 $4" >>"$hosts"
+   fi
+   sudo chmod 644 $hosts
+}
+
+for ((i = 0; i < 10; i++)); do
+   patch_windows_hosts_file "bastion"
+   patch_linux_hosts_file "bastion"
+   patch_linux_hosts_file "master-"
+   patch_linux_hosts_file "worker-"
+   patch_linux_hosts_file "control-"
+   patch_linux_hosts_file "node-"
+   patch_linux_hosts_file "$HINT"
+   patch_linux_hosts_file "$HINT" "$(date)"
+   if [ "$CLOUD_NFS_IP" != "0.0.0.0" ]; then
+      patch_linux_hosts_file "$CLOUD_NFS_IP" "$NFS_CNAME"
+      unset NFS_CNAME
+   fi
+   for subnet in $SUBNETS; do
+      NM="$(echo "$subnet" | sed -r "s/(0\/)/2-/")0"
+      NETLIST=$(nmap -sn --min-parallelism 100 "$NM" | grep "report for" | grep -v "${LB_IP}" | sed -r 's/(\()//' | awk '{print $NF"="$(NF-1)}')
+      if [ -n "$NETLIST" ]; then
+         for host in $NETLIST; do
+            REC=$(echo "$host" | sed -r 's/(\))/ /' | sed -r 's/=/ /')
+            #echo $host
+            host_ADDR=$(echo "$REC" | awk '{print $1}')
+            #    echo $host_ADDR
+            host_NAME=$(sudo ssh "$SSH_MODE" "$SSH_USER"@"$host_ADDR" 'echo "$(hostname -s)"')
+            echo "=====$host_NAME===$host_ADDR==="
+            if [[ $host_NAME =~ "bastion" ]]; then
+               patch_linux_hosts_file "$host_ADDR" "$host_NAME" "$NFS_CNAME"
+            else
+               if [[ $host_NAME =~ "control-plane-0" ]] || [[ $host_NAME =~ "master-0" ]]; then
+                  patch_linux_hosts_file "$host_ADDR" "$host_NAME" prime-master
+               else
+                  patch_linux_hosts_file "$host_ADDR" "$host_NAME"
+               fi
+            fi
+         done
+      fi
+   done
+   check_hosts_rise && break
+   sleep 30
+done
+cat /etc/hosts
+exit 0

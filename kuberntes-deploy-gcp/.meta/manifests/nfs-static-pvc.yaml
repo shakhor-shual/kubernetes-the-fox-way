@@ -1,0 +1,13 @@
+---
+kind: PersistentVolumeClaim 
+apiVersion: v1 
+metadata: 
+    name: pvc-nfs-static-volume1 
+spec:
+    accessModes: 
+        - ReadWriteMany 
+    resources: 
+        requests: 
+            storage: 1Gi
+    volumeName: nfs-static-volume1 # make sure specfied volumeName matches the name of the PersistentVolume you created
+    storageClassName: nfs-csi-static

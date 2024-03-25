@@ -1,0 +1,14 @@
+---
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: monitoring
+  labels:
+    name: monitoring
+---
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: logging
+  labels:
+    name: logging

@@ -1,0 +1,22 @@
+#!/bin/sh
+if [ -n "$1" ]; then
+   /bin/bash /usr/local/bin/hosts-refresh
+   if [ "$1" = "k8adm" ]; then
+      /bin/bash /usr/local/bin/boot-k8s-kubeadm
+      exit 0
+   fi
+
+   if [ "$1" = "k8raw" ]; then
+      /bin/bash /usr/local/bin/boot-k8s-raw
+      exit 0
+   fi
+
+   if [ "$1" = "k3s" ]; then
+      /bin/bash /usr/local/bin/boot-k3s
+      exit 0
+   fi
+
+else
+   sudo touch /usr/local/etc/KUBE-FAIL
+   echo "ANY OR UNKNOWN CLUSTER TYPE FOR DEPLOY"
+fi

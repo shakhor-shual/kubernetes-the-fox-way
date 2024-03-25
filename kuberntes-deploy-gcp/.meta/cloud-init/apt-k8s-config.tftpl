@@ -1,0 +1,175 @@
+#cloud-config
+groups:
+  - docker
+users:
+  - name: ${user}
+    groups: sudo, docker, root
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ${public_key_internal}
+      - ${public_key_custom}
+  - name: root
+    ssh_authorized_keys:
+      - ${public_key_internal}
+      - ${public_key_custom}
+package_update: true
+package_upgrade: true
+packages:
+  # Update the apt package index and install packages needed to use the Docker and Kubernetes apt repositories over HTTPS
+  - apt-transport-https
+  - ca-certificates
+  - golang-cfssl
+  - unzip
+  - curl
+  - gnupg
+  - lsb-release
+  - git
+  - net-tools
+  - mc
+  - socat 
+  - conntrack 
+  - ipset
+  - nmap
+  - rsync
+  - nfs-kernel-server
+  - nfs-common
+  - vim-gtk3
+write_files:
+ -  path: /root/.ssh/id_rsa
+    permissions: "0600"
+    encoding: gzip
+    content: !!binary |
+     ${private_key}
+# Let iptables see bridged traffic
+# https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/#letting-iptables-see-bridged-traffic
+ - path: /etc/modules-load.d/k8s.conf
+   content: |
+    br_netfilter  
+#====================
+ - path: /etc/sysctl.d/k8s.conf
+   content: |
+    net.bridge.bridge-nf-call-ip6tables = 1
+    net.bridge.bridge-nf-call-iptables = 1
+# DuckDNS cron_job setting - REMOVE OR CHANGE IT IF NEED  !!!
+ - path: /etc/cron.d/ddns_cronjob
+   content: |
+    */5 * * * * root  /bin/bash /usr/local/bin/update-dynamic-dns > /dev/null 2>&1
+#====================
+ -  path: /usr/local/etc/all_manifests
+    permissions: "0666"
+    encoding: gzip
+    content: !!binary |
+     ${all-manifests}
+#====================
+ -  path: /usr/local/etc/all_scripts
+    permissions: "0666"
+    encoding: gzip
+    content: !!binary |
+     ${all-scripts}
+#===================/usr/local/etc/-cluster-config-files ================ 
+ -  path: /usr/local/etc/network.ip.cloudnfs
+    permissions: "0644"
+    content: |
+     ${cloudnfs_network_ip}
+#==================== 
+ -  path: /usr/local/etc/front.ip.bastion
+    permissions: "0644"
+    content: |
+     ${front_ip_bastion}
+#====================
+ -  path: /usr/local/etc/ddns.domain.bastion
+    permissions: "0644"
+    content: |
+     ${ddns_domain_bastion}
+#====================
+ -  path: /usr/local/etc/front.ip.ingress
+    permissions: "0644"
+    content: |
+     ${front_ip_ingress}
+#====================
+ -  path: /usr/local/etc/ddns.domain.ingress
+    permissions: "0644"
+    content: |
+     ${ddns_domain_ingress}
+#====================
+ -  path: /usr/local/etc/ddns.access.token
+    permissions: "0644"
+    content: |
+     ${ddns_access_token}
+#====================
+ -  path: /usr/local/etc/ingress.nodes.prefix
+    permissions: "0644"
+    content: |
+     ${ingress_nodes_prefix}
+ #====================
+ -  path: /usr/local/etc/load.balancer.ip
+    permissions: "0644"
+    content: |
+     ${control_plane_lb_ip}
+ #====================
+ -  path: /usr/local/etc/subnets.list.cidr
+    permissions: "0644"
+    content: |
+     ${subnets_list}
+#====================
+ -  path: /usr/local/etc/default.user
+    permissions: "0644"
+    content: |
+     ${user}
+#====================
+ -  path: /usr/local/etc/kubernetes.extra.sans
+    permissions: "0644"
+    content: |
+     ${extra_sans}
+#====================
+ -  path: /home/${user}/.ssh/id_rsa
+    permissions: "0600"
+    encoding: gzip
+    content: !!binary |
+     ${private_key}
+# Add default auto created user to docker group
+system_info:
+  default_user:
+    groups: [docker]
+runcmd:
+#init cluster-setup metadata files & dirs
+ - mkdir -p /usr/local/etc/manifests && chmod 777 /usr/local/etc/manifests
+ - base64 -d /usr/local/etc/all_manifests > /usr/local/etc/all_manifests.zip && unzip /usr/local/etc/all_manifests.zip -d /usr/local/etc/manifests  && chmod 666 /usr/local/etc/manifests/*
+ - base64 -d /usr/local/etc/all_scripts > /usr/local/etc/all_scripts.zip && unzip /usr/local/etc/all_scripts.zip -d /usr/local/bin && chmod 777 /usr/local/bin/* 
+ - rm -f /usr/local/etc/all_manifests* && rm -f /usr/local/etc/all_scripts* 
+ - mv -f /usr/local/etc/manifests/.exports.nfs /etc/exports
+ - chown -R ${user}:${user} /home/${user} 
+ - ln -s /usr/local/etc/manifests /home/${user}/manifests
+ - mkdir -p /mnt/nfs
+ # NEED to correct access rights of homedir when it autocreating with file-copy operation 
+ - modprobe overlay
+ - modprobe br_netfilter # Load br_netfilter module.
+ - echo '1' > /proc/sys/net/bridge/bridge-nf-call-iptables
+ - echo '1' > /proc/sys/net/ipv4/ip_forward
+ - sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+ - swapoff -a
+%{ if kubernetes =="k8adm" ~}
+# Add Docker's official GPG key:
+ - apt-get update
+ - install -m 0755 -d /etc/apt/keyrings
+ - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc sudo chmod a+r /etc/apt/keyrings/docker.asc
+ - chmod a+r /etc/apt/keyrings/docker.asc
+# Add Docker  repository to Apt sources:
+ - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+# Download the public signing key for the Kubernetes package repositories
+ - curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+#Add the appropriate Kubernetes apt repository
+ - echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+ - apt-get update; apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+ - sed -i 's/disabled_p/#disabled_p/g' /etc/containerd/config.toml
+ - systemctl daemon-reload; systemctl enable containerd.service; systemctl restart containerd
+ - apt-get update; apt-get install -y kubelet kubeadm kubectl # Install Docker Engine, kubelet, kubeadm and kubectl 
+ - apt-mark hold kubelet kubeadm kubectl # pin kubelet kubeadm kubectl version
+ - sysctl --system # Reload settings from all system configuration files to take iptables configuration
+%{endif ~}
+# next script use BASH syntax, BUT cloud-init may iggnore its shebang!!!
+ - /bin/bash /usr/local/bin/bootstrap-cluster ${kubernetes} 
+ - /bin/bash /usr/local/bin/ingress-redirect-ports ${ingress_nodes_prefix} 80 30080; /bin/bash /usr/local/bin/ingress-redirect-ports ${ingress_nodes_prefix} 443 30443
+ - /bin/bash /usr/local/bin/ingress-redirect-ports bastion 80 31080; /bin/bash /usr/local/bin/ingress-redirect-ports bastion 443 31443
+   #- test -f /var/run/reboot-required && reboot

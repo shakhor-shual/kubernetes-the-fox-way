@@ -1,0 +1,288 @@
+#!/bin/bash
+##############################################################################
+# This file is part of CW4D toolkit. it SETUP K8s CLUSTER IN kubeadm MODE
+# ("Kubernetes Hard Way" Like)
+# Copyright (C) Vadym Yanik 2024
+#
+# CW4D is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3  of the License, or (at your option) any
+# later version
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; # without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+# more details.
+#
+# You should have received a copy of the GNU General Public License  along
+# with this program; If not, see <http://www.gnu.org/licenses/>.
+###############################################################################
+ETC_usr=/usr/local/etc
+[ ! -s "$ETC_usr/default.user" ] || [ ! -s "$ETC_usr/load.balancer.ip" ] ||
+   [ ! -s "$ETC_usr/ingress.nodes.prefix" ] && exit 1
+
+THIS_HOST=$(hostname -s)
+THIS_HOST_IP=$(ip address | grep inet | grep ens | cut -d/ -f 1 | awk '{print $2}')
+
+# components versions for install
+NFS_CSI_v="4.1.0"
+CALICO_CNI_v="3.27.2"
+NFS_CSI_v="4.6.0"
+#COREDNS_v="1.11.1"
+K9S_v="0.32.4"
+
+# kube common settings
+CNI="calico"
+PODNET="192.168.0.0/16"
+TLS_SAN="$THIS_HOST_IP,127.0.0.1,localhost"
+INGRESS_NODE_PREFIX=$(head <"$ETC_usr"/ingress.nodes.prefix -n 1)
+
+SSH_USER=$(head <"$ETC_usr"/default.user -n 1)
+SSH_MODE="-o StrictHostKeyChecking=no"
+
+MANS="$ETC_usr/manifests"
+INIT_K8_MASTER="$0"
+JOIN_K8_NODE="/usr/local/bin/k8s-join-node"
+JOIN_K8_MASTER="/usr/local/bin/k8s-join-master"
+HOSTS="/etc/hosts"
+MANS="/usr/local/etc/manifests"
+
+function init_bastion_services {
+   echo "=======INIT K9S========"
+   wget -qO- https://github.com/derailed/k9s/releases/download/v$K9S_v/k9s_Linux_amd64.tar.gz | sudo tar xvz -C /usr/local/bin
+
+   echo "=======INIT BASTION NFS STORAGES========"
+   while IFS= read -r nfs_dir; do
+      echo "===$nfs_dir==="
+      sudo mkdir -p "$nfs_dir"
+      sudo chown nobody:nogroup "$nfs_dir"
+      sudo chmod 777 "$nfs_dir"
+   done < <(grep </etc/exports '(' | cut -d ' ' -f 1)
+   sudo systemctl restart nfs-kernel-server
+}
+
+function init_cni_network {
+   echo "==install CNI plugin: $CNI =="
+   if [ "$CNI" = "calico" ]; then
+      sudo kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v$CALICO_CNI_v/manifests/tigera-operator.yaml
+      sudo kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v$CALICO_CNI_v/manifests/custom-resources.yaml
+   else
+      sudo kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+   fi
+}
+
+function finish_setup {
+   echo "=======Labeling nodes for INGRESS Controllers ========"
+   sudo kubectl label nodes bastion ingress-traefik=enable
+   while IFS= read -r instance; do
+      echo "==$instance=="
+      sudo kubectl label nodes "${instance}" ingress-nginx=enable
+   done < <(grep <"$HOSTS" "$INGRESS_NODE_PREFIX" | awk '{print $2}')
+
+   echo "=======INTSALL NFS CSI DRIVER ========"
+   ssh -n "$SSH_MODE" "$SSH_USER@localhost" "sudo curl -skSL https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/v$NFS_CSI_v/deploy/install-driver.sh | bash -s v$NFS_CSI_v -- | sudo tee -a /var/log/csi_install"
+
+   echo "=======APPLY ALL number-started MANIFESTS in next order:========"
+   find $MANS -maxdepth 1 -type f -name '[[:digit:]]*ml' -print0 | sort -z | tr '\000' '\n'
+   find $MANS -maxdepth 1 -type f -name '[[:digit:]]*ml' -print0 | sort -z | xargs -0 cat | kubectl apply -f -
+   echo "=======CLUSTER BOOTSTRAP OVER========"
+   sudo kubectl get nodes
+}
+
+function init_k8_prime_master() {
+   local home_dir="/home/$SSH_USER"
+   local wait=20
+
+   for ((i = 0; i < 100; i++)); do
+      sleep 6
+      if [ -f "/usr/bin/containerd" ]; then
+         echo "containerd installed !!!"
+         echo '1' | sudo tee /proc/sys/net/ipv4/ip_forward >/dev/null
+         sudo systemctl enable containerd.service
+         sudo systemctl restart containerd
+         if [ ! -f /usr/bin/kubeadm ]; then
+            sudo apt update
+            sudo apt install -y kubelet kubeadm kubectl
+            sudo apt-mark hold kubelet kubeadm kubectl
+         fi
+         break
+      else
+         sudo apt update
+         sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+         if [ "$i" -ge "$wait" ]; then
+            echo "containerd NOT FOUND !!!"
+            exit
+         fi
+      fi
+   done
+
+   [ -s /usr/local/etc/kubernetes.extra.sans ] && TLS_SAN="$TLS_SAN,$(cat /usr/local/etc/kubernetes.extra.sans)"
+   [ -s /usr/local/etc/front.ip.bastion ] && TLS_SAN="$TLS_SAN,$(cat /usr/local/etc/front.ip.bastion)"
+
+   if [ -n "$2" ]; then
+      TLS_SAN="$TLS_SAN,$2"
+      KUBEADM_INITS="--v=5 --control-plane-endpoint=$2 --apiserver-cert-extra-sans=$TLS_SAN  --pod-network-cidr=$PODNET --upload-certs" # for HA multi-master control-plane
+   else
+      KUBEADM_INITS="--v=5 --apiserver-advertise-address=$THIS_HOST_IP --apiserver-cert-extra-sans=$TLS_SAN --pod-network-cidr=$PODNET --node-name $THIS_HOST" # for single master
+   fi
+   if [ ! -f "/etc/kubernetes/admin.conf" ]; then
+
+      sudo touch $JOIN_K8_NODE
+      sudo chmod 777 $JOIN_K8_NODE
+      echo '#!/bin/bash' >$JOIN_K8_NODE
+      {
+         echo '[ -f /var/lib/kubelet/config.yaml ] && exit'
+         echo 'echo "1" | sudo tee /proc/sys/net/ipv4/ip_forward >/dev/null'
+         echo 'sudo systemctl enable containerd.service && sudo systemctl restart containerd'
+         echo '[ ! -f /usr/bin/kubeadm ] && sudo apt update && sudo apt install -y kubelet kubeadm kubectl && sudo apt-mark hold kubelet kubeadm kubectl'
+         echo "sudo \\"
+      } >>$JOIN_K8_NODE
+
+      sudo kubeadm init ${KUBEADM_INITS} | tee -a "$home_dir"/k8s-join.txt >/dev/null # !!! DO NOT QUOTE ${KUBEADM_INITS}  to avoid 'init' failure
+      sudo chmod 644 "$home_dir"/k8s-join.txt
+      sudo cat "$home_dir"/k8s-join.txt | sed 's/:6443/:6443 --v=5/g' | tail -n 2 >>$JOIN_K8_NODE
+
+      if [ -n "$2" ]; then
+         sudo touch $JOIN_K8_MASTER
+         sudo chmod 777 $JOIN_K8_MASTER
+         echo '#!/bin/bash' >$JOIN_K8_MASTER
+         {
+            echo '[ -f /var/lib/kubelet/config.yaml ] && exit'
+            echo 'echo "1" | sudo tee /proc/sys/net/ipv4/ip_forward >/dev/null'
+            echo 'sudo systemctl enable containerd.service && sudo systemctl restart containerd'
+            echo '[ ! -f /usr/bin/kubeadm ] && sudo apt update && sudo apt install -y kubelet kubeadm kubectl && sudo apt-mark hold kubelet kubeadm kubectl'
+            echo "sudo \\"
+            [ -n "$3" ] && sudo cat "$home_dir"/k8s-join.txt | sed 's/:6443/:6443 --v=5/g' | tail -n 12 | head -n 4
+         } >>$JOIN_K8_MASTER
+      fi
+
+      sudo mkdir -p /root/.kube
+      sudo cp -f /etc/kubernetes/admin.conf /root/.kube/config
+
+      sudo mkdir -p "$home_dir"/.kube
+      sudo cp -f /etc/kubernetes/admin.conf "$home_dir"/.kube/config
+      sudo chown -R "$SSH_USER":"$SSH_USER" "$home_dir"/.kube/config
+
+      sudo systemctl restart containerd
+      sudo systemctl restart kubelet
+
+      test -f /var/run/reboot-required && sudo reboot
+   else
+      echo "WARNING: Control Plane ALREADY bootstraped!"
+   fi
+}
+
+check_nodes_rise() {
+   local config="/root/.kube/config"
+   while IFS= read -r instance; do
+      if kubectl --kubeconfig $config get nodes 2>&1 | grep -q "$instance"; then
+         echo "$1===rise======$instance="
+      else
+         echo "$1i===down=====$instance="
+         return 1
+      fi
+   done < <(grep <"$HOSTS" "node-\|bastion" | awk '{print $2}' | sort)
+   echo "$1===ALL nodes ready!======"
+   kubectl --kubeconfig /root/.kube/config get nodes
+   return 0
+}
+
+if [[ $THIS_HOST =~ "bastion" ]]; then
+   init_bastion_services
+fi
+
+if [[ $THIS_HOST =~ "master-0" ]]; then
+   if [ "$1" = "init_prime_master" ]; then
+      init_k8_prime_master "$@"
+      exit
+   fi
+fi
+
+if [[ $THIS_HOST =~ "bastion" ]]; then
+   # =======K8s claster deploy script =======
+   echo "=======INIT MASTER========"
+   ssh -n "$SSH_MODE" "$SSH_USER@master-0" "sudo ${INIT_K8_MASTER} init_prime_master "
+   echo "=======started post-init PAUSE to recover master-0 networking ===================="
+   echo "sleep for a while networking reloaded after run kubeadm init"
+   sleep 60
+   echo "=======finished post-init PAUSE to recover $instance networking ==================="
+
+   if ssh -q "$SSH_MODE" "$SSH_USER@master-0" [[ ! -s "/home/$SSH_USER/k8s-join.txt" ]] >/dev/null; then
+      touch /usr/local/etc/KUBE-FAIL
+      echo "!!!=K8S ControlPlane INIT FAILED=!!!"
+      exit 0
+   fi
+
+   sudo mkdir -p /root/.kube
+   sudo mkdir -p "/home/$SSH_USER/.kube"
+   ssh -n "$SSH_MODE" "$SSH_USER@master-0" " sudo cat /etc/kubernetes/admin.conf" >/root/.kube/config
+   ssh -n "$SSH_MODE" "$SSH_USER@master-0" " sudo cat /etc/kubernetes/admin.conf" >"/home/$SSH_USER/.kube/config"
+   ssh -n "$SSH_MODE" "$SSH_USER@master-0" "[ -f ${JOIN_K8_NODE} ] && sudo cat $JOIN_K8_NODE" >$JOIN_K8_NODE
+   ssh -n "$SSH_MODE" "$SSH_USER@master-0" "[ -f ${JOIN_K8_MASTER} ] && sudo cat $JOIN_K8_MASTER" >$JOIN_K8_MASTER
+   ssh -n "$SSH_MODE" "$SSH_USER@master-0" "sudo cat /home/$SSH_USER/k8s-join.txt" >"/home/$SSH_USER/k8s-join.txt"
+   sudo chown -R "$SSH_USER":"$SSH_USER" "/home/$SSH_USER/.kube"
+
+   if [ -s "$JOIN_K8_MASTER" ]; then
+      echo "=======JOIN MASTERS========"
+      sudo chmod 777 $JOIN_K8_MASTER
+      /usr/local/bin/hosts-refresh
+      while IFS= read -r instance; do
+         if [[ $instance =~ master-0 ]]; then
+            #add MASTER as worker-node
+            ssh -n "$SSH_MODE" "$SSH_USER@$instance" "sudo chmod 777 $JOIN_K8_NODE; sudo ${JOIN_K8_NODE}" &
+         else
+            echo "=======JOIN  EXTRA MASTER: $instance ========"
+            ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a /root/k8s-join.txt" <"/home/$SSH_USER/k8s-join.txt"
+            ssh -n "$SSH_MODE" "$SSH_USER@$instance" "sudo mkdir -p /root/.kube"
+            ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a /root/.kube/config" </root/.kube/config
+            ssh -n "$SSH_MODE" "$SSH_USER@$instance" "mkdir -p /home/$SSH_USER/.kube"
+            ssh "$SSH_MODE" "$SSH_USER@$instance" "tee -a /home/$SSH_USER/.kube/config" </home/$SSH_USER/.kube/config
+            ssh "$SSH_MODE" "$SSH_USER@$instance" "tee -a /home/$SSH_USER/k8s-join.txt" <"/home/$SSH_USER/k8s-join.txt"
+
+            ssh -n "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $JOIN_K8_MASTER" <$JOIN_K8_MASTER
+            ssh -n "$SSH_MODE" "$SSH_USER@$instance" "sudo chmod 777 $JOIN_K8_MASTER; sudo ${JOIN_K8_MASTER}" &
+            ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $JOIN_K8_NODE" <$JOIN_K8_NODE
+            ssh -n "$SSH_MODE" "$SSH_USER@$instance" "sudo chmod 777 $JOIN_K8_NODE; sudo ${JOIN_K8_NODE}" &
+         fi
+      done < <(grep </etc/hosts "master" | awk '{print $2}' | sort)
+   fi
+
+   if [ -s "$JOIN_K8_NODE" ]; then
+      echo "=======JOIN NODES========"
+      sudo chmod 777 $JOIN_K8_NODE
+      sudo ${JOIN_K8_NODE} &
+      /usr/local/bin/hosts-refresh
+      #add remote worker-nodes
+      while IFS= read -r instance; do
+         echo "===========NODE=======$instance========================="
+         ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a /root/k8s-join.txt" <"/home/$SSH_USER/k8s-join.txt"
+         ssh -n "$SSH_MODE" "$SSH_USER@$instance" "sudo mkdir -p /root/.kube"
+         ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a /root/.kube/config" </root/.kube/config
+         ssh -n "$SSH_MODE" "$SSH_USER@$instance" "mkdir -p /home/$SSH_USER/.kube"
+         ssh "$SSH_MODE" "$SSH_USER@$instance" "tee -a /home/$SSH_USER/.kube/config" <"/home/$SSH_USER/.kube/config"
+
+         ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $JOIN_K8_NODE" <$JOIN_K8_NODE
+         ssh -n "$SSH_MODE" "$SSH_USER@$instance" "sudo chmod 777 $JOIN_K8_NODE; sudo ${JOIN_K8_NODE}" &
+         echo "Joining in background node: $instance"
+      done < <(grep </etc/hosts "node-\|worker-" | awk '{print $2}' | sort)
+
+      # finalize cluster bootstrap
+      for ((i = 0; i < 60; i++)); do
+         sleep 10
+         if check_nodes_rise $i; then
+            echo "===================Init CNI============================="
+            init_cni_network
+            echo "===========  Apply extra Manifests ====================="
+            sleep 5
+            finish_setup
+            kubectl --kubeconfig /root/.kube/config get nodes >/usr/local/etc/KUBE-OK
+            rm -f "$HOSTS_TMP"
+            exit 0
+         fi
+      done
+   else
+      kubectl --kubeconfig /root/.kube/config get nodes >/usr/local/etc/KUBE-FAIL
+      echo "!!!=K8S BOOTSTRAP FAILED=!!!"
+   fi
+   exit 0
+fi

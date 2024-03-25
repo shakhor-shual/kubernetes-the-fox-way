@@ -1,0 +1,155 @@
+#!/bin/bash
+##############################################################################
+# This file is part of CW4D toolkit. it SETUP K3s KUBERNETES CLUSTER
+# ("Kubernetes Hard Way" Like)
+# Copyright (C) Vadym Yanik 2024
+#
+# CW4D is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3  of the License, or (at your option) any
+# later version
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; # without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+# more details.
+#
+# You should have received a copy of the GNU General Public License  along
+# with this program; If not, see <http://www.gnu.org/licenses/>.
+###############################################################################
+ETC_usr=/usr/local/etc
+BIN_usr=/usr/local/bin
+[ ! -f "$ETC_usr/default.user" ] && exit 1
+
+COREDNS_v="1.11.1"
+K9S_v="0.32.4"
+NFS_CSI_v="4.1.0"
+
+SSH_USER=$(head <$ETC_usr/default.user -n 1)
+THIS_HOST=$(hostname -s)
+THIS_HOST_IP=$(ip address | grep inet | grep ens | cut -d/ -f 1 | awk '{print $2}')
+INGRESS_NODE_PREFIX=$(head <"$ETC_usr"/ingress.nodes.prefix -n 1)
+
+# kube common settings
+#CNI="calico"
+JOIN_K3_UNIT="$0"
+TOKEN_K3S="z6gsdgu37gh40jferka356ry6ukhtyh"
+SSH_MODE="-o StrictHostKeyChecking=no"
+HOSTS="/etc/hosts"
+MANS="$ETC_usr/manifests"
+
+function init_bastion_services {
+   echo "=======INIT K9S========"
+   wget -qO- https://github.com/derailed/k9s/releases/download/v$K9S_v/k9s_Linux_amd64.tar.gz | sudo tar xvz -C /usr/local/bin
+
+   echo "=======INIT BASTION NFS STORAGES========"
+   while IFS= read -r nfs_dir; do
+      echo "===$nfs_dir==="
+      sudo mkdir -p "$nfs_dir"
+      sudo chown nobody:nogroup "$nfs_dir"
+      sudo chmod 777 "$nfs_dir"
+   done < <(grep </etc/exports '(' | cut -d ' ' -f 1)
+   sudo systemctl restart nfs-kernel-server
+}
+
+function finish_setup {
+   echo "=======Labeling nodes for INGRESS Controllers ========"
+   sudo kubectl label nodes bastion ingress-traefik=enable
+   while IFS= read -r instance; do
+      echo "==$instance=="
+      sudo kubectl label nodes "${instance}" ingress-nginx=enable
+   done < <(grep <"$HOSTS" "$INGRESS_NODE_PREFIX" | awk '{print $2}')
+
+   echo "=======INTSALL NFS CSI DRIVER ========"
+   ssh -n "$SSH_MODE" "$SSH_USER@localhost" "sudo curl -skSL https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/v$NFS_CSI_v/deploy/install-driver.sh | bash -s v$NFS_CSI_v -- | sudo tee -a /var/log/csi_install"
+
+   echo "=======APPLY ALL number-started MANIFESTS in next order:========"
+   find $MANS -maxdepth 1 -type f -name '[[:digit:]]*ml' ! -name '*traefik*' -print0 | sort -z | tr '\000' '\n'
+   find $MANS -maxdepth 1 -type f -name '[[:digit:]]*ml' ! -name '*traefik*' -print0 | sort -z | xargs -0 cat | kubectl apply -f -
+   echo "=======CLUSTER BOOTSTRAP OVER========"
+   sudo kubectl get nodes
+}
+
+function k3s_join() {
+   [ -z "$1" ] || [ -z "$2" ] || [ -f "$BIN_usr/k3s" ] && return
+   [ -f "$BIN_usr/k3s" ] && exit
+   if [ "$3" = "join_k3s_master" ]; then
+      echo "====JOIN K3S MASTER===="
+      curl -sfL https://get.k3s.io | K3S_TOKEN=$2 sh -s - server --server https://"$1":6443
+   else
+      echo "====JOIN K3S AGENT====="
+      curl -sfL https://get.k3s.io | K3S_URL=https://$1:6443 K3S_TOKEN=$2 sh -
+      systemctl enable --now k3s-agent
+   fi
+}
+
+check_nodes_rise() {
+   local config="/etc/rancher/k3s/k3s.yaml"
+   while IFS= read -r instance; do
+      if kubectl --kubeconfig $config get nodes 2>&1 | grep -q "$instance"; then
+         echo "$1===rise======$instance="
+      else
+         echo "$1i===down=====$instance="
+         return 1
+      fi
+   done < <(grep <"$HOSTS" "node-\|bastion" | awk '{print $2}' | sort)
+   echo "$1===ALL nodes ready!======"
+   kubectl --kubeconfig /root/.kube/config get nodes
+   return 0
+}
+
+if [[ $THIS_HOST =~ "bastion" ]]; then
+   init_bastion_services
+fi
+
+if [[ $THIS_HOST =~ "master-0" ]]; then
+   echo "=======INIT MASTER========"
+
+   if [ -s $ETC_usr/load.balancer.ip ]; then
+      KUBE_LB_IP=$(head <$ETC_usr/load.balancer.ip -n 1)
+      TLS_SAN="$THIS_HOST_IP,$KUBE_LB_IP,127.0.0.1,localhost"
+   else
+      KUBE_LB_IP=$THIS_HOST_IP
+      TLS_SAN="$THIS_HOST_IP,127.0.0.1,localhost"
+   fi
+
+   [ -s $ETC_usr/kubernetes.extra.sans ] && TLS_SAN="$TLS_SAN,$(cat $ETC_usr/kubernetes.extra.sans)"
+   [ -s $ETC_usr/front.ip.bastion ] && TLS_SAN="$(head <$ETC_usr/front.ip.bastion -n 1),$TLS_SAN"
+
+   curl -sfL https://get.k3s.io | K3S_TOKEN=$TOKEN_K3S sh -s - server --cluster-init --tls-san="$TLS_SAN" --write-kubeconfig-mode 644
+
+   while IFS= read -r instance; do
+      echo "===$instance==="
+      if [[ $instance =~ "master" ]]; then
+         ssh -n "$SSH_MODE" "$SSH_USER@$instance" "${JOIN_K3_UNIT} ${THIS_HOST_IP} ${TOKEN_K3S} join_k3s_master"
+      else
+         ssh -n "$SSH_MODE" "$SSH_USER@$instance" "${JOIN_K3_UNIT} ${KUBE_LB_IP} ${TOKEN_K3S} join_k3s_node"
+      fi
+      ssh -n "$SSH_MODE" "$SSH_USER@$instance" "[ ! -d /etc/rancher/k3s ] && sudo mkdir -p /etc/rancher/k3s"
+      ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a /etc/rancher/k3s/k3s.yaml" < <(sed </etc/rancher/k3s/k3s.yaml "s/127.0.0.1/$KUBE_LB_IP/")
+      ssh -n "$SSH_MODE" "$SSH_USER@$instance" "sudo mkdir -p /root/.kube"
+      ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a /root/.kube/config" < <(sed </etc/rancher/k3s/k3s.yaml "s/127.0.0.1/$KUBE_LB_IP/")
+      ssh -n "$SSH_MODE" "$SSH_USER@$instance" "sudo chmod 600 /root/.kube/config"
+      ssh -n "$SSH_MODE" "$SSH_USER@$instance" "mkdir -p /home/$SSH_USER/.kube"
+      ssh "$SSH_MODE" "$SSH_USER@$instance" "tee -a /home/$SSH_USER/.kube/config" < <(sed </etc/rancher/k3s/k3s.yaml "s/127.0.0.1/$KUBE_LB_IP/")
+      ssh -n "$SSH_MODE" "$SSH_USER@$instance" "chmod 600 /home/$SSH_USER/.kube/config"
+   done < <(grep </etc/hosts "master-\|node-\|bastion" | grep -v "master-0" | awk '{print $2} ' | sort)
+
+   # finalize cluster bootstrap
+   for ((i = 0; i < 60; i++)); do
+      sleep 10
+      if check_nodes_rise $i; then
+         echo "===================Init DNS============================="
+         sed <$MANS/.coredns.tpl "s/coredns:1.9.4/coredns:$COREDNS_v/; s/clusterIP: 10.32.0.10/clusterIP: ${KUBE_CP_IP}0/" | kubectl apply -f -
+         echo "===========  Apply extra Manifests ====================="
+         sleep 5
+         finish_setup
+         ssh "$SSH_MODE" "$SSH_USER@bastion" "sudo tee -a  touch /usr/local/etc/KUBE-OK" < <(kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes)
+         exit 0
+      fi
+   done
+   ssh "$SSH_MODE" "$SSH_USER@bastion" "sudo tee -a  touch /usr/local/etc/KUBE-FAIL" < <(kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes)
+   exit 0
+else
+   [ "$3" = "join_k3s_master" ] || [ "$3" = "join_k3s_node" ] && k3s_join "$@"
+fi

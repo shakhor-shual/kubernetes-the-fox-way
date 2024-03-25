@@ -1,0 +1,27 @@
+#!/bin/bash
+##############################################################################
+# This file is part of CW4D toolkit. it SETUP K8s CLUSTER IN RAW MODE
+# ("Kubernetes Hard Way" Like)
+# Copyright (C) Vadym Yanik 2024
+#
+# CW4D is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3  of the License, or (at your option) any
+# later version
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; # without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+# more details.
+#
+# You should have received a copy of the GNU General Public License  along
+# with this program; If not, see <http://www.gnu.org/licenses/>.
+###############################################################################
+if [[ "$(/usr/bin/hostname -s)" =~ "bastion" ]]; then
+    DuckDNS_DOMAIN_BASTION=$(head </usr/local/etc/ddns.domain.bastion -n 1)
+    DuckDNS_DOMAIN_INGRESS=$(head </usr/local/etc/ddns.domain.ingress -n 1)
+    DuckDNS_ACCESS_TOKEN=$(head </usr/local/etc/ddns.access.token -n 1)
+    DuckDNS_IP_INGRESS=$(head </usr/local/etc/front.ip.ingress -n 1)
+    echo "url=https://www.duckdns.org/update?domains=$DuckDNS_DOMAIN_BASTION&token=$DuckDNS_ACCESS_TOKEN&ip=" | curl -k -o /var/log/duck_dns.log -K -
+    echo "url=https://www.duckdns.org/update?domains=$DuckDNS_DOMAIN_INGRESS&token=$DuckDNS_ACCESS_TOKEN&ip=$DuckDNS_IP_INGRESS" | curl -k -o /var/log/duck_dns.log -K -
+fi

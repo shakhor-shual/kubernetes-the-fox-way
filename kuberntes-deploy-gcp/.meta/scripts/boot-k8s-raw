@@ -1,0 +1,1084 @@
+#!/bin/bash
+##############################################################################
+# This file is part of CW4D toolkit. it SETUP K8s CLUSTER IN RAW MODE
+# ("Kubernetes Hard Way" Like)
+# Copyright (C) Vadym Yanik 2024
+#
+# CW4D is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3  of the License, or (at your option) any
+# later version
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; # without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+# more details.
+#
+# You should have received a copy of the GNU General Public License  along
+# with this program; If not, see <http://www.gnu.org/licenses/>.
+###############################################################################
+ETC_usr=/usr/local/etc
+[ ! -s "$ETC_usr/default.user" ] || [ ! -s "$ETC_usr/load.balancer.ip" ] ||
+  [ ! -f "$ETC_usr/ingress.nodes.prefix" ] && exit 1
+
+# components versions for install
+KUBE_v="1.29.0" # tested only for Kubernetes 1.21 - 1.29
+ETCD_v="3.5.12"
+CONTAINERD_v="1.7.14"
+RUNC_v="1.1.12"
+CNI_PLUGINS_v="1.4.1"
+CNI_API_v="1.0.0"
+CALICO_CNI_v="3.27.2"
+NFS_CSI_v="4.6.0"
+COREDNS_v="1.11.1"
+K9S_v="0.32.4"
+
+# kube common settings
+CLUSTER_NAME="kubernetes-blik"
+CNI="calico"
+KUBE_HOSTNAMES="kubernetes,kubernetes.default,kubernetes.default.svc,\
+kubernetes.default.svc.cluster,kubernetes.svc.cluster.local"
+CLUSTER_CIDR="10.200.0.0/16"
+PODS_CIDR_SPACE="10.200.XXX.0/24"
+PODS_PREFIX=10
+
+KUBE_CP_IP="10.32.0.1"
+KUBE_LB_IP=$(head <"$ETC_usr"/load.balancer.ip -n 1)
+INGRESS_NODE_PREFIX=$(head <"$ETC_usr"/ingress.nodes.prefix -n 1)
+SSH_USER=$(head <"$ETC_usr"/default.user -n 1)
+SSH_MODE="-o StrictHostKeyChecking=no"
+
+MANS="$ETC_usr/manifests"
+HOSTS_TMP=$(mktemp)
+BUILD_DIR=/root/kube_build
+INIT_DIR=/root/kube_init
+THIS_IP=$(hostname -I | awk '{print $1}')
+THIS_HOST=$(hostname -s)
+KUBE_CONTROL_PLANE=$KUBE_CP_IP
+
+copy_when_ready() {
+  for ((i = 0; i < 120; i++)); do
+    [ -f "$INIT_DIR/$1" ] && sudo cp -f "$INIT_DIR/$1" "$2"/"$1" && break
+    sleep 2
+  done
+}
+
+function init_install_process() {
+  mkdir -p $INIT_DIR
+  sudo cp -f /etc/hosts "$HOSTS_TMP"
+
+  while IFS= read -r instance; do
+    master_name=$(grep <"$HOSTS_TMP" "${instance}" | awk '{print $2}')
+    if [ -z "${ETCDLIST}" ]; then
+      ETCDLIST=${master_name}=https://${instance}:2380
+      ETCDLIST_CP=https://${instance}:2379
+    else
+      ETCDLIST=${ETCDLIST},${master_name}=https://${instance}:2380
+      ETCDLIST_CP=${ETCDLIST_CP},https://${instance}:2379
+    fi
+    KUBE_CONTROL_PLANE=$KUBE_CONTROL_PLANE,${instance}
+  done < <(grep <"$HOSTS_TMP" "master-\|control-" | awk '{print $1}')
+
+  echo "$KUBE_CONTROL_PLANE"
+  echo "$ETCDLIST"
+  echo "$ETCDLIST_CP"
+
+  wget https://storage.googleapis.com/kubernetes-release/release/v$KUBE_v/bin/linux/amd64/kubectl
+  chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+}
+
+function init_bastion_services {
+  echo "=======INIT K9S========"
+  wget -qO- https://github.com/derailed/k9s/releases/download/v$K9S_v/k9s_Linux_amd64.tar.gz | sudo tar xvz -C /usr/local/bin
+
+  echo "=======INIT BASTION NFS STORAGES========"
+  while IFS= read -r nfs_dir; do
+    echo "===$nfs_dir==="
+    sudo mkdir -p "$nfs_dir"
+    sudo chown nobody:nogroup "$nfs_dir"
+    sudo chmod 777 "$nfs_dir"
+  done < <(grep </etc/exports '(' | cut -d ' ' -f 1)
+  sudo systemctl restart nfs-kernel-server
+}
+
+function init_cni_network {
+  echo "==install CNI plugin: $CNI =="
+  if [ "$CNI" = "calico" ]; then
+    sudo kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v$CALICO_CNI_v/manifests/tigera-operator.yaml
+    sudo kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v$CALICO_CNI_v/manifests/custom-resources.yaml
+  else
+    sudo kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+  fi
+}
+
+function finish_setup {
+  sudo kubectl get nodes
+  echo "=======Labeling nodes for INGRESS Controllers ========"
+  sudo kubectl label nodes bastion ingress-traefik=enable
+  while IFS= read -r instance; do
+    echo "==$instance=="
+    sudo kubectl label nodes "${instance}" ingress-nginx=enable
+  done < <(grep <"$HOSTS_TMP" "$INGRESS_NODE_PREFIX" | awk '{print $2}')
+
+  echo "=======INTSALL NFS CSI DRIVER ========"
+  ssh -n "$SSH_MODE" "$SSH_USER@localhost" "sudo curl -skSL https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/v$NFS_CSI_v/deploy/install-driver.sh | bash -s v$NFS_CSI_v -- | sudo tee -a /var/log/csi_install"
+
+  echo "=======APPLY ALL number-started MANIFESTS in next order:========"
+  find $MANS -maxdepth 1 -type f -name '[[:digit:]]*ml' -print0 | sort -z | tr '\000' '\n'
+  find $MANS -maxdepth 1 -type f -name '[[:digit:]]*ml' -print0 | sort -z | xargs -0 cat | kubectl apply -f -
+  echo "=======CLUSTER BOOTSTRAP OVER========"
+
+}
+
+function gencert_CA {
+  echo "=========================================================="
+  echo "Generate the CA configuration file, certificate, and private key:"
+  echo "=========================================================="
+  cat >ca-config.json <<EOF
+{ "signing": {
+    "default": {
+      "expiry": "8760h"
+    },
+    "profiles": {
+      "kubernetes": {
+        "usages": ["signing", "key encipherment", "server auth", "client auth"],
+        "expiry": "8760h"
+}}}}
+EOF
+  cat >ca-csr.json <<EOF
+{ "CN": "Kubernetes",
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [{
+      "C": "PL",
+      "L": "Bydgoszcz",
+      "O": "Kubernetes",
+      "OU": "CA",
+      "ST": "Kuyavian–Pomeranian"
+}]}
+EOF
+  cfssl gencert -initca ca-csr.json | cfssljson -bare ca
+}
+
+function gencert_Admin {
+  echo "=========================================================="
+  echo "Generate the admin client certificate and private key"
+  echo "=========================================================="
+  cat >admin-csr.json <<EOF
+{ "CN": "admin",
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [{
+      "C": "PL",
+      "L": "Bydgoszcz",
+      "O": "system:masters",
+      "OU": "Shakhor Shual KUBE",
+      "ST": "Kuyavian–Pomeranian"
+}]}
+EOF
+  cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json \
+    -profile=kubernetes admin-csr.json | cfssljson -bare admin
+}
+
+function gencert_ControllerManager {
+  echo "=========================================================="
+  echo "Generate the kube-controller-manager client certificate and private key"
+  echo "=========================================================="
+  cat >kube-controller-manager-csr.json <<EOF
+{ "CN": "system:kube-controller-manager",
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [{
+      "C": "PL",
+      "L": "Bydgoszcz",
+      "O": "system:kube-controller-manager",
+      "OU": "Shakhor Shual KUBE",
+      "ST": "Kuyavian–Pomeranian"
+}]}
+EOF
+  cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json \
+    -profile=kubernetes kube-controller-manager-csr.json | cfssljson -bare kube-controller-manager
+}
+
+function gencert_KubeProxy {
+  echo "=========================================================="
+  echo "Generate the kube-proxy client certificate and private key"
+  echo "=========================================================="
+  cat >kube-proxy-csr.json <<EOF
+{ "CN": "system:kube-proxy",
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [{
+      "C": "PL",
+      "L": "Bydgoszcz",
+      "O": "system:node-proxier",
+      "OU": "Shakhor Shual KUBE",
+      "ST": "Kuyavian–Pomeranian"
+}]}
+EOF
+  cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json \
+    -profile=kubernetes kube-proxy-csr.json | cfssljson -bare kube-proxy
+}
+
+function gencert_CubeScheduler {
+  echo "=========================================================="
+  echo "Generate the kube-scheduler client certificate and private key:"
+  echo "=========================================================="
+  cat >kube-scheduler-csr.json <<EOF
+{ "CN": "system:kube-scheduler",
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [{
+      "C": "PL",
+      "L": "Bydgoszcz",
+      "O": "system:kube-scheduler",
+      "OU": "Shakhor Shual KUBE",
+      "ST": "Kuyavian–Pomeranian"
+}]}
+EOF
+  cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json \
+    -profile=kubernetes kube-scheduler-csr.json | cfssljson -bare kube-scheduler
+}
+
+function gencert_CubeAPIserver {
+  echo "=========================================================="
+  echo "Generate the Kubernetes API Server certificate and private key:"
+  echo "=========================================================="
+  cat >kubernetes-csr.json <<EOF
+{ "CN": "kubernetes",
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [{
+      "C": "PL",
+      "L": "Bydgoszcz",
+      "O": "Kubernetes",
+      "OU": "Shakhor Shual KUBE",
+      "ST": "Kuyavian–Pomeranian"
+}]}
+EOF
+  cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json \
+    -hostname="${KUBE_CONTROL_PLANE}","${KUBE_LB_IP}",127.0.0.1,${KUBE_HOSTNAMES} \
+    -profile=kubernetes kubernetes-csr.json | cfssljson -bare kubernetes
+}
+
+function gencert_ServiceAccount {
+  echo "=========================================================="
+  echo "Generate the service-account certificate and private key:"
+  echo "=========================================================="
+  cat >service-account-csr.json <<EOF
+{ "CN": "service-accounts",
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [
+    { "C": "PL",
+      "L": "Bydgoszcz",
+      "O": "Kubernetes",
+      "OU": "Shakhor Shual KUBE",
+      "ST": "Kuyavian–Pomeranian"
+}]}
+EOF
+  cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json \
+    -profile=kubernetes service-account-csr.json | cfssljson -bare service-account
+}
+
+function gencert_MastersFullSet {
+  gencert_CA
+  gencert_Admin
+  gencert_ControllerManager
+  gencert_KubeProxy
+  gencert_CubeScheduler
+  gencert_CubeAPIserver
+  gencert_ServiceAccount
+  while IFS= read -r instance; do
+    echo "==$instance=="
+    # sudo scp "$SSH_MODE" ca.pem ca-key.pem kubernetes-key.pem kubernetes.pem service-account-key.pem service-account.pem "$SSH_USER"@"${instance}":~/
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/ca.pem" <ca.pem
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/ca-key.pem" <ca-key.pem
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/kubernetes-key.pem" <kubernetes-key.pem
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/kubernetes.pem" <kubernetes.pem
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/service-account-key.pem" <service-account-key.pem
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/service-account.pem" <service-account.pem
+  done < <(grep <"$HOSTS_TMP" "master-\|control-" | awk '{print $2}')
+}
+
+function gencert_Workers {
+  echo "=========================================================="
+  echo "gencert_Workers"
+  echo "=========================================================="
+
+  while IFS= read -r instance; do
+    echo "==$instance=="
+    cat >"${instance}"-csr.json <<EOF
+{ "CN": "system:node:${instance}",
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [{
+      "C": "PL",
+      "L": "Bydgoszcz",
+      "O": "system:nodes",
+      "OU": "Shakhor Shual KUBE",
+      "ST": "Kuyavian–Pomeranian"
+}]}
+EOF
+    WORKER_IP=$(grep <"$HOSTS_TMP" "${instance}" | awk '{print $1}')
+    cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json \
+      -hostname="${instance}","${WORKER_IP}" -profile=kubernetes "${instance}"-csr.json | cfssljson -bare "${instance}"
+
+  done < <(grep <"$HOSTS_TMP" "worker\|node-\|bastion" | awk '{print $2}')
+
+  echo "------USED HOSTS LIST---------"
+  cat "$HOSTS_TMP"
+  MR=10
+  while IFS= read -r instance; do
+    echo "==$instance=="
+    #sudo scp "$SSH_MODE" ca.pem "${instance}"-key.pem "${instance}".pem "$SSH_USER"@"${instance}":~/
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/ca.pem" <ca.pem
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/${instance}-key.pem" <"${instance}"-key.pem
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/${instance}.pem" <"${instance}".pem
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/pods.prefix" < <(echo "$MR")
+    MR=$(echo "$MR+10" | bc)
+  done < <(grep <"$HOSTS_TMP" "node-\|bastion" | awk '{print $2}' | sort)
+}
+
+function install_ETCD {
+
+  echo "=========================================================="
+  echo "install_ETCD"
+  echo "=========================================================="
+  wget -q --show-progress --https-only --timestamping \
+    "https://github.com/etcd-io/etcd/releases/download/v$ETCD_v/etcd-v$ETCD_v-linux-amd64.tar.gz"
+
+  tar -xvf etcd-v$ETCD_v-linux-amd64.tar.gz
+  sudo mv etcd-v$ETCD_v-linux-amd64/etcd* /usr/local/bin/
+  sudo rm -rf etcd-v$ETCD_v-linux-amd64*
+
+  sudo mkdir -p /etc/etcd /var/lib/etcd
+  sudo chmod 700 /var/lib/etcd
+
+  copy_when_ready ca.pem /etc/etcd
+  copy_when_ready kubernetes-key.pem /etc/etcd
+  copy_when_ready kubernetes.pem /etc/etcd
+  ETCD_NAME=$(hostname -s)
+
+  cat <<EOF | sudo tee /etc/systemd/system/etcd.service
+[Unit]
+Description=etcd
+Documentation=https://github.com/coreos
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/etcd \\
+  --name ${ETCD_NAME} \\
+  --cert-file=/etc/etcd/kubernetes.pem \\
+  --key-file=/etc/etcd/kubernetes-key.pem \\
+  --peer-cert-file=/etc/etcd/kubernetes.pem \\
+  --peer-key-file=/etc/etcd/kubernetes-key.pem \\
+  --trusted-ca-file=/etc/etcd/ca.pem \\
+  --peer-trusted-ca-file=/etc/etcd/ca.pem \\
+  --peer-client-cert-auth \\
+  --client-cert-auth \\
+  --initial-advertise-peer-urls https://${THIS_IP}:2380 \\
+  --listen-peer-urls https://${THIS_IP}:2380 \\
+  --listen-client-urls https://${THIS_IP}:2379,https://127.0.0.1:2379 \\
+  --advertise-client-urls https://${THIS_IP}:2379 \\
+  --initial-cluster-token etcd-cluster-0 \\
+  --initial-cluster ${ETCDLIST} \\
+  --initial-cluster-state new \\
+  --data-dir=/var/lib/etcd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo systemctl daemon-reload
+  sudo systemctl enable etcd
+  sudo systemctl start etcd
+
+  sudo ETCDCTL_API=3 etcdctl member list --endpoints=https://127.0.0.1:2379 \
+    --cacert=/etc/etcd/ca.pem --cert=/etc/etcd/kubernetes.pem --key=/etc/etcd/kubernetes-key.pem
+}
+
+function install_Control_Plane {
+  local api_v="v1"
+  echo "=========================================================="
+  echo "Download and Install the Kubernetes Controller Binaries  "
+  echo "=========================================================="
+  sudo mkdir -p /etc/kubernetes/config
+  wget -q --show-progress --https-only --timestamping \
+    "https://storage.googleapis.com/kubernetes-release/release/v$KUBE_v/bin/linux/amd64/kube-apiserver" \
+    "https://storage.googleapis.com/kubernetes-release/release/v$KUBE_v/bin/linux/amd64/kube-controller-manager" \
+    "https://storage.googleapis.com/kubernetes-release/release/v$KUBE_v/bin/linux/amd64/kube-scheduler" \
+    "https://storage.googleapis.com/kubernetes-release/release/v$KUBE_v/bin/linux/amd64/kubectl"
+
+  chmod +x kube-apiserver kube-controller-manager kube-scheduler kubectl
+  sudo mv kube-apiserver kube-controller-manager kube-scheduler kubectl /usr/local/bin/
+  echo "=========================================================="
+  echo "Configure the Kubernetes API Server"
+  echo "=========================================================="
+  sudo mkdir -p /var/lib/kubernetes/
+
+  copy_when_ready ca.pem /var/lib/kubernetes
+  copy_when_ready ca-key.pem /var/lib/kubernetes
+  copy_when_ready kubernetes-key.pem /var/lib/kubernetes
+  copy_when_ready kubernetes.pem /var/lib/kubernetes
+  copy_when_ready service-account-key.pem /var/lib/kubernetes
+  copy_when_ready service-account.pem /var/lib/kubernetes
+  copy_when_ready encryption-config.yaml /var/lib/kubernetes
+
+  cat <<EOF | sudo tee /etc/systemd/system/kube-apiserver.service
+[Unit]
+Description=Kubernetes API Server
+Documentation=https://github.com/kubernetes/kubernetes
+
+[Service]
+ExecStart=/usr/local/bin/kube-apiserver \\
+  --advertise-address=${THIS_IP} \\
+  --allow-privileged=true \\
+  --apiserver-count=3 \\
+  --audit-log-maxage=30 \\
+  --audit-log-maxbackup=3 \\
+  --audit-log-maxsize=100 \\
+  --audit-log-path=/var/log/audit.log \\
+  --authorization-mode=Node,RBAC \\
+  --bind-address=0.0.0.0 \\
+  --client-ca-file=/var/lib/kubernetes/ca.pem \\
+  --enable-admission-plugins=NamespaceLifecycle,NodeRestriction,LimitRanger,ServiceAccount,DefaultStorageClass,ResourceQuota \\
+  --etcd-cafile=/var/lib/kubernetes/ca.pem \\
+  --etcd-certfile=/var/lib/kubernetes/kubernetes.pem \\
+  --etcd-keyfile=/var/lib/kubernetes/kubernetes-key.pem \\
+  --etcd-servers=${ETCDLIST_CP} \\
+  --event-ttl=1h \\
+  --encryption-provider-config=/var/lib/kubernetes/encryption-config.yaml \\
+  --kubelet-certificate-authority=/var/lib/kubernetes/ca.pem \\
+  --kubelet-client-certificate=/var/lib/kubernetes/kubernetes.pem \\
+  --kubelet-client-key=/var/lib/kubernetes/kubernetes-key.pem \\
+  --runtime-config='api/all=true' \\
+  --service-account-key-file=/var/lib/kubernetes/service-account.pem \\
+  --service-account-signing-key-file=/var/lib/kubernetes/service-account-key.pem \\
+  --service-account-issuer=https://${KUBE_LB_IP}:6443 \\
+  --service-cluster-ip-range=10.32.0.0/24 \\
+  --service-node-port-range=30000-32767 \\
+  --tls-cert-file=/var/lib/kubernetes/kubernetes.pem \\
+  --tls-private-key-file=/var/lib/kubernetes/kubernetes-key.pem \\
+  --v=2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  echo "=========================================================="
+  echo "Configure the Kubernetes Controller Manager"
+  echo "=========================================================="
+  copy_when_ready kube-controller-manager.kubeconfig /var/lib/kubernetes
+
+  cat <<EOF | sudo tee /etc/systemd/system/kube-controller-manager.service
+[Unit]
+Description=Kubernetes Controller Manager
+Documentation=https://github.com/kubernetes/kubernetes
+
+[Service]
+ExecStart=/usr/local/bin/kube-controller-manager \\
+  --bind-address=0.0.0.0 \\
+  --cluster-cidr=${CLUSTER_CIDR} \\
+  --cluster-name=kubernetes \\
+  --cluster-signing-cert-file=/var/lib/kubernetes/ca.pem \\
+  --cluster-signing-key-file=/var/lib/kubernetes/ca-key.pem \\
+  --kubeconfig=/var/lib/kubernetes/kube-controller-manager.kubeconfig \\
+  --leader-elect=true \\
+  --root-ca-file=/var/lib/kubernetes/ca.pem \\
+  --service-account-private-key-file=/var/lib/kubernetes/service-account-key.pem \\
+  --service-cluster-ip-range=10.32.0.0/24 \\
+  --use-service-account-credentials=true \\
+  --v=2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  echo "=========================================================="
+  echo "Configure the Kubernetes Scheduler"
+  echo "=========================================================="
+  copy_when_ready kube-scheduler.kubeconfig /var/lib/kubernetes
+
+  cat <<EOF | sudo tee /etc/kubernetes/config/kube-scheduler.yaml
+apiVersion: kubescheduler.config.k8s.io/${api_v}
+kind: KubeSchedulerConfiguration
+clientConnection:
+  kubeconfig: "/var/lib/kubernetes/kube-scheduler.kubeconfig"
+leaderElection:
+  leaderElect: true
+EOF
+
+  echo "=========================================================="
+  echo "Create the kube-scheduler.service systemd unit file:"
+  echo "=========================================================="
+  cat <<EOF | sudo tee /etc/systemd/system/kube-scheduler.service
+[Unit]
+Description=Kubernetes Scheduler
+Documentation=https://github.com/kubernetes/kubernetes
+
+[Service]
+ExecStart=/usr/local/bin/kube-scheduler \\
+  --config=/etc/kubernetes/config/kube-scheduler.yaml \\
+  --v=2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  echo "=========================================================="
+  echo "Start the Controller Services"
+  echo "=========================================================="
+  sudo systemctl daemon-reload
+  sudo systemctl enable kube-apiserver kube-controller-manager kube-scheduler
+  sudo systemctl start kube-apiserver kube-controller-manager kube-scheduler
+
+  for ((i = 0; i < 30; i++)); do
+    kubectl --kubeconfig $INIT_DIR/admin.kubeconfig cluster-info | grep Kubernetes -q && touch "$INIT_DIR"/KUBE_OK && break
+    sleep 6
+  done
+  kubectl cluster-info
+}
+
+function setup_RBAC {
+  echo "=========================================================="
+  echo "setup_RBAC"
+  echo "=========================================================="
+  cat <<EOF | kubectl apply --kubeconfig admin.kubeconfig -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  annotations:
+    rbac.authorization.kubernetes.io/autoupdate: "true"
+  labels:
+    kubernetes.io/bootstrapping: rbac-defaults
+  name: system:kube-apiserver-to-kubelet
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - nodes/proxy
+      - nodes/stats
+      - nodes/log
+      - nodes/spec
+      - nodes/metrics
+    verbs:
+      - "*"
+EOF
+  cat <<EOF | kubectl apply --kubeconfig admin.kubeconfig -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: system:kube-apiserver
+  namespace: ""
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:kube-apiserver-to-kubelet
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: kubernetes
+EOF
+}
+
+function genconfig_KubeAuth {
+  echo "================================================"
+  echo "The kubelet Kubernetes Configuration File"
+  echo "Generate a kubeconfig file for each worker node:"
+  echo "================================================"
+
+  while IFS= read -r instance; do
+
+    echo "==$instance=="
+    kubectl config set-cluster "$CLUSTER_NAME" \
+      --certificate-authority=ca.pem \
+      --embed-certs=true \
+      --server=https://"${KUBE_LB_IP}":6443 \
+      --kubeconfig="${instance}".kubeconfig
+
+    kubectl config set-credentials system:node:"${instance}" \
+      --client-certificate="${instance}".pem \
+      --client-key="${instance}"-key.pem \
+      --embed-certs=true \
+      --kubeconfig="${instance}".kubeconfig
+
+    kubectl config set-context default \
+      --cluster="$CLUSTER_NAME" \
+      --user=system:node:"${instance}" \
+      --kubeconfig="${instance}".kubeconfig
+
+    kubectl config use-context default --kubeconfig="${instance}".kubeconfig
+
+  done < <(grep <"$HOSTS_TMP" "worker\|node-\|bastion" | awk '{print $2}')
+
+  echo "================================================"
+  echo "The kube-proxy Kubernetes Configuration File"
+  echo "Generate a kubeconfig file for the kube-proxy service:"
+  echo "================================================"
+  kubectl config set-cluster "$CLUSTER_NAME" \
+    --certificate-authority=ca.pem \
+    --embed-certs=true \
+    --server=https://"${KUBE_LB_IP}":6443 \
+    --kubeconfig=kube-proxy.kubeconfig
+
+  kubectl config set-credentials system:kube-proxy \
+    --client-certificate=kube-proxy.pem \
+    --client-key=kube-proxy-key.pem \
+    --embed-certs=true \
+    --kubeconfig=kube-proxy.kubeconfig
+
+  kubectl config set-context default \
+    --cluster="$CLUSTER_NAME" \
+    --user=system:kube-proxy \
+    --kubeconfig=kube-proxy.kubeconfig
+
+  kubectl config use-context default --kubeconfig=kube-proxy.kubeconfig
+
+  echo "================================================"
+  echo "The kube-controller-manager Kubernetes Configuration File"
+  echo "Generate a kubeconfig file for the kube-controller-manager service:"
+  echo "================================================"
+  kubectl config set-cluster "$CLUSTER_NAME" \
+    --certificate-authority=ca.pem \
+    --embed-certs=true \
+    --server=https://127.0.0.1:6443 \
+    --kubeconfig=kube-controller-manager.kubeconfig
+
+  kubectl config set-credentials system:kube-controller-manager \
+    --client-certificate=kube-controller-manager.pem \
+    --client-key=kube-controller-manager-key.pem \
+    --embed-certs=true \
+    --kubeconfig=kube-controller-manager.kubeconfig
+
+  kubectl config set-context default \
+    --cluster="$CLUSTER_NAME" \
+    --user=system:kube-controller-manager \
+    --kubeconfig=kube-controller-manager.kubeconfig
+
+  kubectl config use-context default --kubeconfig=kube-controller-manager.kubeconfig
+
+  echo "================================================"
+  echo "The kube-scheduler Kubernetes Configuration File"
+  echo "Generate a kubeconfig file for the kube-scheduler service:"
+  echo "================================================"
+  kubectl config set-cluster "$CLUSTER_NAME" \
+    --certificate-authority=ca.pem \
+    --embed-certs=true \
+    --server=https://127.0.0.1:6443 \
+    --kubeconfig=kube-scheduler.kubeconfig
+
+  kubectl config set-credentials system:kube-scheduler \
+    --client-certificate=kube-scheduler.pem \
+    --client-key=kube-scheduler-key.pem \
+    --embed-certs=true \
+    --kubeconfig=kube-scheduler.kubeconfig
+
+  kubectl config set-context default \
+    --cluster="$CLUSTER_NAME" \
+    --user=system:kube-scheduler \
+    --kubeconfig=kube-scheduler.kubeconfig
+
+  kubectl config use-context default --kubeconfig=kube-scheduler.kubeconfig
+
+  echo "================================================"
+  echo "The admin Kubernetes Configuration File"
+  echo "Generate a kubeconfig file for the admin user:"
+  echo "================================================"
+  kubectl config set-cluster "$CLUSTER_NAME" \
+    --certificate-authority=ca.pem \
+    --embed-certs=true \
+    --server=https://127.0.0.1:6443 \
+    --kubeconfig=admin.kubeconfig
+
+  kubectl config set-credentials admin \
+    --client-certificate=admin.pem \
+    --client-key=admin-key.pem \
+    --embed-certs=true \
+    --kubeconfig=admin.kubeconfig
+
+  kubectl config set-context default \
+    --cluster="$CLUSTER_NAME" \
+    --user=admin \
+    --kubeconfig=admin.kubeconfig
+
+  kubectl config use-context default --kubeconfig=admin.kubeconfig
+
+  echo "================================================"
+  echo "Distribute the Kubernetes Configuration Files"
+  echo "================================================"
+
+  # ACROSS MASTERS
+  while IFS= read -r instance; do
+    echo "==$instance=="
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/kube-controller-manager.kubeconfig" <kube-controller-manager.kubeconfig
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/kube-scheduler.kubeconfig" <kube-scheduler.kubeconfig
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/admin.kubeconfig" <admin.kubeconfig
+  done < <(grep <"$HOSTS_TMP" "master-\|control-" | awk '{print $2}')
+
+  # ACROSS WORKERS
+  while IFS= read -r instance; do
+    echo "==$instance=="
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/kube-proxy.kubeconfig" <kube-proxy.kubeconfig
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/${instance}.kubeconfig" <"${instance}".kubeconfig
+  done < <(grep <"$HOSTS_TMP" "worker\|node-\|bastion" | awk '{print $2}')
+}
+
+function genconfig_DataEcrypt {
+  echo "================================================"
+  echo "The Encryption Config File"
+  echo "================================================"
+  ENCRYPTION_KEY=$(head -c 32 /dev/urandom | base64)
+
+  cat >encryption-config.yaml <<EOF
+kind: EncryptionConfig
+apiVersion: v1
+resources:
+  - resources:
+      - secrets
+    providers:
+      - aescbc:
+          keys:
+            - name: key1
+              secret: ${ENCRYPTION_KEY}
+      - identity: {}
+EOF
+  #ACROSS MASTERS
+  while IFS= read -r instance; do
+    echo "==$instance=="
+    ssh "$SSH_MODE" "$SSH_USER@$instance" "sudo tee -a $INIT_DIR/encryption-config.yaml" <encryption-config.yaml
+  done < <(grep <"$HOSTS_TMP" "master-\|control-" | awk '{print $2}')
+}
+
+function init_Node {
+  local hostname=$THIS_HOST
+
+  [ -s $INIT_DIR/pods.prefix ] && PODS_PREFIX=$(cat $INIT_DIR/pods.prefix)
+  POD_CIDR=$(echo $PODS_CIDR_SPACE | sed -r "s/XXX/$PODS_PREFIX/")
+
+  sudo swapoff -a
+
+  wget -q --show-progress --https-only --timestamping \
+    https://github.com/kubernetes-sigs/cri-tools/releases/download/v$KUBE_v/crictl-v$KUBE_v-linux-amd64.tar.gz \
+    https://github.com/opencontainers/runc/releases/download/v$RUNC_v/runc.amd64 \
+    https://github.com/containernetworking/plugins/releases/download/v$CNI_PLUGINS_v/cni-plugins-linux-amd64-v$CNI_PLUGINS_v.tgz \
+    https://github.com/containerd/containerd/releases/download/v$CONTAINERD_v/containerd-$CONTAINERD_v-linux-amd64.tar.gz \
+    https://storage.googleapis.com/kubernetes-release/release/v$KUBE_v/bin/linux/amd64/kubectl \
+    https://storage.googleapis.com/kubernetes-release/release/v$KUBE_v/bin/linux/amd64/kube-proxy \
+    https://storage.googleapis.com/kubernetes-release/release/v$KUBE_v/bin/linux/amd64/kubelet
+
+  sudo mkdir -p /etc/cni/net.d /opt/cni/bin /var/lib/kubelet \
+    /var/lib/kube-proxy /var/lib/kubernetes /var/run/kubernetes
+
+  mkdir containerd
+  tar -xvf crictl-v$KUBE_v-linux-amd64.tar.gz
+  tar -xvf containerd-$CONTAINERD_v-linux-amd64.tar.gz -C containerd
+  sudo tar -xvf cni-plugins-linux-amd64-v$CNI_PLUGINS_v.tgz -C /opt/cni/bin/
+  sudo mv runc.amd64 runc
+  chmod +x crictl kubectl kube-proxy kubelet runc
+  sudo mv crictl kubectl kube-proxy kubelet runc /usr/local/bin/
+  sudo mv containerd/bin/* /bin/
+
+  sudo rm -rf containerd
+  sudo rm -f ./*gz
+
+  cat <<EOF | sudo tee /etc/cni/net.d/10-bridge.conf
+{
+    "cniVersion": "${CNI_API_v}",
+    "name": "bridge",
+    "type": "bridge",
+    "bridge": "cnio0",
+    "isGateway": true,
+    "ipMasq": true,
+    "ipam": {
+        "type": "host-local",
+        "ranges": [
+          [{"subnet": "${POD_CIDR}"}]
+        ],
+        "routes": [{"dst": "0.0.0.0/0"}]
+    }
+}
+EOF
+  cat <<EOF | sudo tee /etc/cni/net.d/99-loopback.conf
+{
+    "cniVersion": "${CNI_API_v}",
+    "name": "loopback",
+    "type": "loopback"
+}
+EOF
+  sudo mkdir -p /etc/containerd/
+
+  cat <<EOF | sudo tee /etc/containerd/config.toml
+[plugins]
+  [plugins.cri.containerd]
+    snapshotter = "overlayfs"
+    [plugins.cri.containerd.default_runtime]
+      runtime_type = "io.containerd.runtime.v1.linux"
+      runtime_engine = "/usr/local/bin/runc"
+      runtime_root = ""
+EOF
+  cat <<EOF | sudo tee /etc/systemd/system/containerd.service
+[Unit]
+Description=containerd container runtime
+Documentation=https://containerd.io
+After=network.target
+
+[Service]
+ExecStartPre=/sbin/modprobe overlay
+ExecStart=/bin/containerd
+Restart=always
+RestartSec=5
+Delegate=yes
+KillMode=process
+OOMScoreAdjust=-999
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  copy_when_ready ca.pem /var/lib/kubernetes
+  copy_when_ready "${hostname}"-key.pem /var/lib/kubelet
+  copy_when_ready "${hostname}".pem /var/lib/kubelet
+  copy_when_ready "${hostname}".kubeconfig /var/lib/kubelet
+  sudo mv /var/lib/kubelet/"${hostname}".kubeconfig /var/lib/kubelet/kubeconfig
+
+  cat <<EOF | sudo tee /var/lib/kubelet/kubelet-config.yaml
+kind: KubeletConfiguration
+apiVersion: kubelet.config.k8s.io/v1beta1
+authentication:
+  anonymous:
+    enabled: false
+  webhook:
+    enabled: true
+  x509:
+    clientCAFile: "/var/lib/kubernetes/ca.pem"
+authorization:
+  mode: Webhook
+clusterDomain: "cluster.local"
+clusterDNS:
+  - "10.32.0.10"
+podCIDR: "${POD_CIDR}"
+resolvConf: "/run/systemd/resolve/resolv.conf"
+runtimeRequestTimeout: "15m"
+tlsCertFile: "/var/lib/kubelet/${hostname}.pem"
+tlsPrivateKeyFile: "/var/lib/kubelet/${hostname}-key.pem"
+EOF
+
+  case $(echo $KUBE_v | cut -d '.' -f 2) in
+  1[0-9] | 2[0-3]) #for kubernetes =<1.23
+    cat <<EOF | sudo tee /etc/systemd/system/kubelet.service
+[Unit]
+Description=Kubernetes Kubelet
+Documentation=https://github.com/kubernetes/kubernetes
+After=containerd.service
+Requires=containerd.service
+
+[Service]
+ExecStart=/usr/local/bin/kubelet \\
+  --config=/var/lib/kubelet/kubelet-config.yaml \\
+  --container-runtime=remote \\
+  --container-runtime-endpoint=unix:///var/run/containerd/containerd.sock \\
+  --image-pull-progress-deadline=2m \\
+  --kubeconfig=/var/lib/kubelet/kubeconfig \\
+  --network-plugin=cni \\
+  --register-node=true \\
+  --v=2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    ;;
+  2[4-6])
+    cat <<EOF | sudo tee /etc/systemd/system/kubelet.service
+[Unit]
+Description=Kubernetes Kubelet
+Documentation=https://github.com/kubernetes/kubernetes
+After=containerd.service
+Requires=containerd.service
+
+[Service]
+ExecStart=/usr/local/bin/kubelet \\
+  --config=/var/lib/kubelet/kubelet-config.yaml \\
+  --container-runtime=remote \\
+  --container-runtime-endpoint=unix:///var/run/containerd/containerd.sock \\
+  --kubeconfig=/var/lib/kubelet/kubeconfig \\
+  --register-node=true \\
+  --v=2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    ;;
+  *) # for kubernetes >=1.27
+    cat <<EOF | sudo tee /etc/systemd/system/kubelet.service
+[Unit]
+Description=Kubernetes Kubelet
+Documentation=https://github.com/kubernetes/kubernetes
+After=containerd.service
+Requires=containerd.service
+
+[Service]
+ExecStart=/usr/local/bin/kubelet \\
+  --config=/var/lib/kubelet/kubelet-config.yaml \\
+  --container-runtime-endpoint=unix:///var/run/containerd/containerd.sock \\
+  --kubeconfig=/var/lib/kubelet/kubeconfig \\
+  --register-node=true \\
+  --v=5
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    ;;
+  esac
+
+  echo "Configure the Kubernetes Proxy"
+  copy_when_ready kube-proxy.kubeconfig /var/lib/kube-proxy
+  sudo mv /var/lib/kube-proxy/kube-proxy.kubeconfig /var/lib/kube-proxy/kubeconfig
+
+  cat <<EOF | sudo tee /var/lib/kube-proxy/kube-proxy-config.yaml
+kind: KubeProxyConfiguration
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+clientConnection:
+  kubeconfig: "/var/lib/kube-proxy/kubeconfig"
+mode: "ipvs"
+clusterCIDR: "${CLUSTER_CIDR}"
+EOF
+  cat <<EOF | sudo tee /etc/systemd/system/kube-proxy.service
+[Unit]
+Description=Kubernetes Kube Proxy
+Documentation=https://github.com/kubernetes/kubernetes
+
+[Service]
+ExecStart=/usr/local/bin/kube-proxy \\
+  --config=/var/lib/kube-proxy/kube-proxy-config.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo systemctl daemon-reload
+  sudo systemctl enable containerd kubelet kube-proxy
+  sudo systemctl start containerd kubelet kube-proxy
+}
+
+check_kubecofig_ready() {
+  for ((i = 0; i < 60; i++)); do
+    [[ -s "$1" ]] && return 0
+    sleep 5
+  done
+  sudo touch /usr/local/etc/KUBE-FAIL
+  return 1
+}
+
+check_nodes_rise() {
+  local config="/root/.kube/config"
+  while IFS= read -r instance; do
+    if kubectl --kubeconfig $config get nodes 2>&1 | grep -q "$instance"; then
+      echo "$1===rise======$instance="
+    else
+      echo "$1i===down=====$instance="
+      return 1
+    fi
+  done < <(grep <"$HOSTS_TMP" "node-\|bastion" | awk '{print $2}' | sort)
+  echo "$1===ALL nodes ready!======"
+  kubectl --kubeconfig /root/.kube/config get nodes
+  return 0
+}
+
+echo "================================================"
+echo "======== INSTALL K8s in RAW mode ==============="
+echo "================================================"
+init_install_process
+
+if [[ $THIS_HOST =~ "bastion" ]]; then
+  mkdir -p $BUILD_DIR && cd $BUILD_DIR || exit
+
+  # Init configs&certs for Masters and Workers
+  gencert_MastersFullSet
+  genconfig_DataEcrypt
+  gencert_Workers
+  genconfig_KubeAuth
+  #after this point all kubeconfigs are distributed over cluster
+
+  sudo mkdir -p /root/.kube
+  cat $BUILD_DIR/admin.kubeconfig | sed "s/https:\/\/[^3]*/https:\/\/$KUBE_LB_IP:644/" >/root/.kube/config
+  chmod 600 /root/.kube/config
+
+  sudo mkdir -p "/home/$SSH_USER/.kube"
+  sudo cp /root/.kube/config "/home/$SSH_USER/.kube/config"
+  sudo chown -R "$SSH_USER":"$SSH_USER" "/home/$SSH_USER/.kube"
+  init_bastion_services
+fi
+
+if [[ $THIS_HOST =~ "master" ]] || [[ $THIS_HOST =~ "control" ]]; then
+  if check_kubecofig_ready $INIT_DIR/admin.kubeconfig; then
+    cd $INIT_DIR || exit
+    install_ETCD
+    install_Control_Plane
+    setup_RBAC
+  fi
+fi
+
+if [[ $THIS_HOST =~ "bastion" ]] || [[ $THIS_HOST =~ "worker" ]] || [[ $THIS_HOST =~ "node" ]]; then
+  if check_kubecofig_ready "$INIT_DIR/$THIS_HOST.kubeconfig"; then
+    cd $INIT_DIR || exit
+    init_Node
+
+    if [[ $THIS_HOST =~ "bastion" ]]; then
+      export KUBECONFIG=/root/.kube/config
+
+      for ((i = 0; i < 60; i++)); do
+        sleep 10
+        if check_nodes_rise $i; then
+          echo "===================Init CNI============================="
+          init_cni_network
+          echo "===================Init DNS============================="
+          sed <$MANS/.coredns.tpl "s/coredns:1.9.4/coredns:$COREDNS_v/; s/clusterIP: 10.32.0.10/clusterIP: ${KUBE_CP_IP}0/" | kubectl apply -f -
+          echo "===========  Apply extra Manifests ====================="
+          sleep 5
+          finish_setup
+          kubectl --kubeconfig /root/.kube/config get nodes >/usr/local/etc/KUBE-OK
+          rm -f "$HOSTS_TMP"
+          exit 0
+        fi
+      done
+      echo "!!!!!!!!!!!!! BOOTSTRAP FAILED !!!!!!!!!!"
+      cat "$HOSTS_TMP"
+      rm -f "$HOSTS_TMP"
+      kubectl --kubeconfig /root/.kube/config get nodes >/usr/local/etc/KUBE-FAIL
+      exit 1
+    fi
+  fi
+fi
+rm -f "$HOSTS_TMP"
