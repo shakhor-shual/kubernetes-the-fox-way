@@ -62,7 +62,7 @@ nano variables.tf
 terraform init && terraform apply
 
  - Access info for deployed cluster management will be printed
- in the finish of bootstrap process.****
+ in the finish of bootstrap process.
  ATTENTION: bootstrapping of cluster required at least 7-10 minutes ****
 
 ---------------------------------------------------------------------------------------
