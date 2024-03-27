@@ -1,14 +1,15 @@
 provider "google" {
-  credentials = file(var.credentials_file)
-  project     = var.project_id
-  region      = var.region
+  # !!!UNCOMMENT next line for use Service Account key access INSTEAD user-account ADC
+  #  credentials = file(var.credentials_file)
+  project = var.project_id
+  region  = var.region
 }
 
-provider "google-beta" {
-  credentials = file(var.credentials_file)
-  project     = var.project_id
-  region      = var.region
-}
+#provider "google-beta" {
+#  credentials = file(var.credentials_file)
+#  project     = var.project_id
+#  region      = var.region
+#}
 
 locals {
   supported_deployments = ["k3s", "k8adm", "k8raw"]
@@ -24,8 +25,10 @@ locals {
   file_store_count   = var.nfs_pv_size < 1024 ? 0 : 1
   control_plane_size = local.kubernetes == "k8adm" ? 1 : 3
   deploy_on_demand   = local.control_plane_size == 1 ? 0 : 1
-  machine_type_auto  = local.control_plane_size == 1 ? var.shift_machine_type : var.machine_type
-  custom_key_public  = fileexists(var.custom_key_public) ? file(var.custom_key_public) : local_file.public_key.content
+  machine_type_auto  = local.control_plane_size == 1 ? var.powered_machine_type : var.machine_type
+
+
+  custom_key_public = fileexists(var.custom_key_public) ? file(var.custom_key_public) : local_file.public_key.content
 
   domain = "example.com"
   #- export DuckDNS_DOMAIN_BASTION=shuala-bastion &&  export DuckDNS_DOMAIN_INGRESS=shuala-ingress && export DuckDNS_ACCESS_TOKEN=71138021-1493-4e65-9d1f-b99d704eb7a7 && $DuckDNS_IP_INGRESS=
@@ -229,7 +232,7 @@ resource "google_compute_instance" "bastion" {
   name                      = "bastion"
   hostname                  = "bastion.${local.domain}"
   description               = "Linux Server"
-  machine_type              = local.machine_type_auto
+  machine_type              = local.nfs_server_gb != 0 ? var.powered_machine_type : var.machine_type
   zone                      = var.zone
   allow_stopping_for_update = true
   deletion_protection       = false
@@ -278,7 +281,7 @@ resource "google_compute_instance" "master" {
   name                      = "master-${count.index}"
   hostname                  = "master-${count.index}.${local.domain}"
   description               = "Linux Server"
-  machine_type              = local.machine_type_auto
+  machine_type              = local.control_plane_size == 1 ? var.powered_machine_type : var.machine_type
   zone                      = var.zone
   allow_stopping_for_update = true
   deletion_protection       = false
