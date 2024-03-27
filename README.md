@@ -40,7 +40,7 @@ access instead ADC you need to uncomment (and edit) the corresponding lines in t
 - variables.tf
 - maint.tf
 
-#QUICK START:
+QUICK START:
 
 - Enabled APIs for Compute Engine ad Filestore services (use GCP console) if not yet.
 
