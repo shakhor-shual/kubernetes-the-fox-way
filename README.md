@@ -11,7 +11,7 @@ through a regular SSH connection to the bastion node and/or LOCALLY through an
 automatically created SSH tunnel loclahost->bastion->Control Plane. To make the 
 first method easier, a fake FQDN "bastion.gcp" will be automatically added (and
  configured) to the local /etc/hosts file. It is highly recommended to add the path 
- to your ssh public key to the variable.tf file for easy SSH access.** The second method 
+ to your ssh public key to the variable.tf file for easy SSH access. The second method 
  will be configured completely automatically and will use the key pairs generated 
  during deployment. In BOTH modes, you can use any Kubernetes tools designed for 
  kubeconfig-managed access (kubectl, k9s, etc.). Accordingly configured kubeconfigs 
@@ -22,48 +22,31 @@ supported Kubernetes kinds:
 - k8adm:  kubeadm k8s - 1 master
 - k3s:    runcher k3s - 3 masters
 
-
 All of the following steps assume you already have:
 - Local Linux machine (bare metal, WSL, Virtual Box, etc.) with Terraform and Git installed.
 - active GCP user account
 - GCP project with billing activated (e.g. trial version)
-- At least  Editor role rights in this project for chosen access way,
- which can be one of :
-a) Configured Application Default Credentials (ADC) for your user account 
-(read https://cloud.google.com/docs/authentication/provide-credentials-adc)
-OR
-b) Access key(i.e. kind of special json file) for any Service Account (in this project),
-generated via GCP console and downloaded locally  
+- At least  Editor role rights in this project for chosen access way (one of):
 
-By default, project files are configured for ADC access mode. To use the Service Account
-access instead ADC you need to uncomment (and edit) the corresponding lines in the files:
-- variables.tf
-- maint.tf
+Configured Application Default Credentials (ADC) for your user account  <= OR =>
+Access key for any Service Account (in this project), generated via GCP console and 
+downloaded locally **  
 
 QUICK START:
-
 - Enabled APIs for Compute Engine ad Filestore services (use GCP console) if not yet.
 
-- clone repository:
+- clone repository:  git clone https://github.com/shakhor-shual/kubernetes-the-fox-way.git
 
- git clone https://github.com/shakhor-shual/kubernetes-the-fox-way.git
-
-- go to the project's working folder
-
-cd kubernetes-the-fox-way/kuberntes-deploy-gcp
+- go to the project's working folder:   cd kubernetes-the-fox-way/kuberntes-deploy-gcp
 
 - MANDATORY: modify (in variables.tf)  ALL strings looks like: default="CHANGE-IT-TO-YOURS!" 
- to yours real settings(you ca use "nano" or any another editor)
-- ADDITIONAL: modify any another defaults accordingly your requirements:
+to yours real settings(you ca use "nano" or any another editor) . ADDITIONAL: modify
+any another defaults accordingly your requirements:  nano variables.tf
+   
+- Deploy Kubernetes cluster:  terraform init && terraform apply
 
-nano variables.tf    
-- Deploy all needful infrastructure and bootstrap Kubernetes cluster:
-
-terraform init && terraform apply
-
- - Access info for deployed cluster management will be printed
- in the finish of bootstrap process.
- ATTENTION: bootstrapping of cluster required at least 7-10 minutes ****
+ - Access info for deployed cluster management will be printed  in the finish of bootstrap
+process.  ATTENTION: bootstrapping of cluster required at least 7-10 minutes ****
 
 ---------------------------------------------------------------------------------------
 *NFS storage can be deployed on bastion or as a separate cloud service; the deployment 
@@ -71,8 +54,9 @@ type is selected automatically depending on the specified storage size in GB (va
 automatically creates a separate NFS storage on the cloud service). Using a dedicated NFS s
 torage significantly lengthens the initial deployment process!
 
-**Recommended to use k9s tool (pred-installed on bastion) for quick cluster 
-manipulation via regular-SSH 
+**By default, project files are configured for ADC access mode. To use the Service Account
+access instead ADC you need to uncomment(edit) the corresponding lines in the files:
+variables.tf,  maint.tf
  
 ***k8raw - implies the use of Control Plane, compiled directly from Linux 
 daemons, i.e. without wrapper-containers. Such solutions are described in detail 
