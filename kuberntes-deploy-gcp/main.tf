@@ -25,7 +25,7 @@ locals {
   control_plane_size = local.kubernetes == "k8adm" ? 1 : 3
   deploy_on_demand   = local.control_plane_size == 1 ? 0 : 1
   machine_type_auto  = local.control_plane_size == 1 ? var.shift_machine_type : var.machine_type
-  custom_public_key  = fileexists("../.meta/id_rsa.pub") ? file("../.meta/id_rsa.pub") : local_file.public_key.content
+  custom_key_public  = fileexists(var.custom_key_public) ? file(var.custom_key_public) : local_file.public_key.content
 
   domain = "example.com"
   #- export DuckDNS_DOMAIN_BASTION=shuala-bastion &&  export DuckDNS_DOMAIN_INGRESS=shuala-ingress && export DuckDNS_ACCESS_TOKEN=71138021-1493-4e65-9d1f-b99d704eb7a7 && $DuckDNS_IP_INGRESS=
@@ -171,7 +171,7 @@ data "template_file" "cloud_conf" {
     user                 = var.ssh_user
     private_key          = base64gzip(local_sensitive_file.private_key.content),
     public_key_internal  = local_file.public_key.content,
-    public_key_custom    = local.custom_public_key,
+    public_key_custom    = local.custom_key_public,
     all-manifests        = base64gzip(filebase64(data.archive_file.manifests.output_path)),
     all-scripts          = base64gzip(filebase64(data.archive_file.scripts.output_path)),
     front_ip_bastion     = google_compute_address.ip_address_bastion.address,
@@ -207,13 +207,13 @@ resource "tls_private_key" "my_vm_access" {
 }
 
 resource "local_file" "public_key" {
-  filename        = var.ssh_key_public
+  filename        = var.auto_key_public
   content         = trimspace(tls_private_key.my_vm_access.public_key_openssh)
   file_permission = "0400"
 }
 
 resource "local_sensitive_file" "private_key" {
-  filename = var.ssh_key_private
+  filename = var.auto_key_privare
   # IMPORTANT: Newline is required at end of open SSH private key file
   content         = tls_private_key.my_vm_access.private_key_openssh
   file_permission = "0400"

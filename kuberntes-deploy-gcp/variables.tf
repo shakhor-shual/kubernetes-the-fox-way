@@ -43,13 +43,18 @@ variable "ssh_user" {
   default     = "shual"
 }
 
-variable "ssh_key_public" {
-  description = "SSH public keys for accessing the instance"
+variable "custom_key_public" {
+  description = "Path-to existing user-defined SSH public key (simplify external access to bastion) "
+  default     = "~/.ssh/id_rsa_pub.pem"
+}
+
+variable "auto_key_public" {
+  description = "Path-to auto-generated SSH public key (shared for all claster VMs)"
   default     = "../.meta/public.key"
 }
 
-variable "ssh_key_private" {
-  description = "SSH private key for accessing the instance"
+variable "auto_key_privare" {
+  description = "Path-to auto-generated SSH private key (shared for all claster VMs)"
   default     = "../.meta/private.key"
 }
 
