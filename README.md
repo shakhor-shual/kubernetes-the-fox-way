@@ -33,17 +33,16 @@ Access key for any Service Account (in this project), generated via GCP console 
 downloaded locally **  
 
 QUICK START:
-- Enabled APIs for Compute Engine ad Filestore services (use GCP console) if not yet.
+- Enable APIs for Compute Engine and Filestore services if not yet. (use GCP console)
 
-- clone repository:  git clone https://github.com/shakhor-shual/kubernetes-the-fox-way.git
+- git clone https://github.com/shakhor-shual/kubernetes-the-fox-way.git (clone repository)
 
-- go to the project's working folder:   cd kubernetes-the-fox-way/kuberntes-deploy-gcp
+- cd kubernetes-the-fox-way/kuberntes-deploy-gcp (go to the project's working folder)
 
-- MANDATORY: modify (in variables.tf)  ALL strings looks like: default="CHANGE-IT-TO-YOURS!" 
-to yours real settings(you ca use "nano" or any another editor) . ADDITIONAL: modify
-any another defaults accordingly your requirements:  nano variables.tf
+- nano variables.tf  (MANDATORY: modify  ALL strings looks like: default="CHANGE-IT-TO-YOURS!" 
+to yours real settings. ADDITIONAL: modify any another defaults accordingly your requirements)
    
-- Deploy Kubernetes cluster:  terraform init && terraform apply
+- terraform init && terraform apply  (Deploy Kubernetes cluster)
 
  - Access info for deployed cluster management will be printed  in the finish of bootstrap
 process.  ATTENTION: bootstrapping of cluster required at least 7-10 minutes ****
