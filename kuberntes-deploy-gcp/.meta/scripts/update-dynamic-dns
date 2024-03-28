@@ -17,11 +17,11 @@
 # You should have received a copy of the GNU General Public License  along
 # with this program; If not, see <http://www.gnu.org/licenses/>.
 ###############################################################################
-if [[ "$(/usr/bin/hostname -s)" =~ "bastion" ]]; then
+if [[ "$(/usr/bin/hostname -s)" =~ "bastion" ]] && [ ! -s /usr/local/etc/ddns.access.token ]; then
     DuckDNS_DOMAIN_BASTION=$(head </usr/local/etc/ddns.domain.bastion -n 1)
     DuckDNS_DOMAIN_INGRESS=$(head </usr/local/etc/ddns.domain.ingress -n 1)
     DuckDNS_ACCESS_TOKEN=$(head </usr/local/etc/ddns.access.token -n 1)
     DuckDNS_IP_INGRESS=$(head </usr/local/etc/front.ip.ingress -n 1)
-    echo "url=https://www.duckdns.org/update?domains=$DuckDNS_DOMAIN_BASTION&token=$DuckDNS_ACCESS_TOKEN&ip=" | curl -k -o /var/log/duck_dns.log -K -
-    echo "url=https://www.duckdns.org/update?domains=$DuckDNS_DOMAIN_INGRESS&token=$DuckDNS_ACCESS_TOKEN&ip=$DuckDNS_IP_INGRESS" | curl -k -o /var/log/duck_dns.log -K -
+    [ -n "$DuckDNS_DOMAIN_BASTION" ] && echo "url=https://www.duckdns.org/update?domains=$DuckDNS_DOMAIN_BASTION&token=$DuckDNS_ACCESS_TOKEN&ip=" | curl -k -o /var/log/duck_dns.log -K -
+    [ -n "$DuckDNS_DOMAIN_INGRESS" ] && echo "url=https://www.duckdns.org/update?domains=$DuckDNS_DOMAIN_INGRESS&token=$DuckDNS_ACCESS_TOKEN&ip=$DuckDNS_IP_INGRESS" | curl -k -o /var/log/duck_dns.log -K -
 fi

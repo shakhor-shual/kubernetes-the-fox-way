@@ -96,8 +96,6 @@ variable "nfs_pv_size" {
   default     = 25
 }
 
-
-
 #supported DDNS provider - Duck-DDNS
 variable "ddns_domain_ingress" {
   description = "DUCK DDNS domain for ingress LB IP (nginx-based ingress) "
@@ -111,6 +109,6 @@ variable "ddns_domain_bastion" {
 
 variable "ddns_access_token" {
   description = "Duck-DDNS access touken for domains refresh"
-  default     = "TAKE-IT-FROM-DACK-DDNS-PROVIDER-ID-IT_USED"
+  default     = "TAKE-IT-FROM-DUCK-DDNS-PROVIDER-IF-THIS-USED"
 }
 
