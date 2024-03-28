@@ -5,12 +5,6 @@ provider "google" {
   region  = var.region
 }
 
-#provider "google-beta" {
-#  credentials = file(var.credentials_file)
-#  project     = var.project_id
-#  region      = var.region
-#}
-
 locals {
   supported_deployments = ["k3s", "k8adm", "k8raw"]
   kubernetes            = contains(local.supported_deployments, var.kube_kind) ? var.kube_kind : "k8adm"
@@ -27,15 +21,9 @@ locals {
   deploy_on_demand   = local.control_plane_size == 1 ? 0 : 1
   machine_type_auto  = local.control_plane_size == 1 ? var.powered_machine_type : var.machine_type
 
-
   custom_key_public = fileexists(var.custom_key_public) ? file(var.custom_key_public) : local_file.public_key.content
 
-  domain = "example.com"
-  #- export DuckDNS_DOMAIN_BASTION=shuala-bastion &&  export DuckDNS_DOMAIN_INGRESS=shuala-ingress && export DuckDNS_ACCESS_TOKEN=71138021-1493-4e65-9d1f-b99d704eb7a7 && $DuckDNS_IP_INGRESS=
-  ddns_domain_ingress = "shuala-bastion"
-  ddns_domain_bastion = "shuala-ingress"
-  ddns_access_token   = "71138021-1493-4e65-9d1f-b99d704eb7a7"
-
+  domain = "example.local"
   kube_kinds = {
     k3s   = { health_path = "/ping", health_port = "6443", config_path = "/etc/rancher/k3s/k3s.yaml" }
     k8adm = { health_path = "/healthz", health_port = "6443", config_path = "/root/.kube/config" }
@@ -179,9 +167,9 @@ data "template_file" "cloud_conf" {
     all-scripts          = base64gzip(filebase64(data.archive_file.scripts.output_path)),
     front_ip_bastion     = google_compute_address.ip_address_bastion.address,
     front_ip_ingress     = google_compute_address.ingress_ip_address.address,
-    ddns_domain_ingress  = local.ddns_domain_ingress
-    ddns_domain_bastion  = local.ddns_domain_bastion
-    ddns_access_token    = local.ddns_access_token
+    ddns_domain_ingress  = var.ddns_domain_ingress
+    ddns_domain_bastion  = var.ddns_domain_bastion
+    ddns_access_token    = var.ddns_access_token
     bastion_network_ip   = local.bastion_network_ip,
     cloudnfs_network_ip  = local.filestore_network_ip,
     control_plane_lb_ip  = local.kube_load_balancing.ip_address,
@@ -189,6 +177,7 @@ data "template_file" "cloud_conf" {
     kubernetes           = local.kubernetes,
     extra_sans           = local.extra_sans,
     ingress_nodes_prefix = var.ingress_host
+    kubernetes_release   = var.kubernetes_release
   }
   depends_on = [local_file.public_key, local_sensitive_file.private_key]
 }

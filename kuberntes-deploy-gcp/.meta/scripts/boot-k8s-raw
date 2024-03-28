@@ -22,7 +22,7 @@ ETC_usr=/usr/local/etc
   [ ! -f "$ETC_usr/ingress.nodes.prefix" ] && exit 1
 
 # components versions for install
-KUBE_v="1.29.0" # tested only for Kubernetes 1.21 - 1.29
+KUBE_v=$(check_kube_release "$(head <"$ETC_usr"/kubernetes.release -n 1)")
 ETCD_v="3.5.12"
 CONTAINERD_v="1.7.14"
 RUNC_v="1.1.12"
@@ -61,6 +61,20 @@ copy_when_ready() {
     [ -f "$INIT_DIR/$1" ] && sudo cp -f "$INIT_DIR/$1" "$2"/"$1" && break
     sleep 2
   done
+}
+
+function check_kube_release() {
+  if [ -n "$1" ]; then
+    local major
+    local version=$1
+    major=$(echo "$version" | awk -F. '{print $1"."$2}')
+    if ! wget -T 60 -O- "https://raw.githubusercontent.com/kubernetes/kubernetes/master/CHANGELOG/CHANGELOG-$major.md" 2>&1 | grep "$major" | grep '^- \[' | cut -d ']' -f1 | cut -d '[' -f2 | tr -d 'v' | grep -q "$1\$"; then
+      sleep 5
+      version=$(wget -T 60 -O- "https://raw.githubusercontent.com/kubernetes/kubernetes/master/CHANGELOG/CHANGELOG-$major.md" 2>&1 | grep "$major" | grep '^- \[' | cut -d ']' -f1 | cut -d '[' -f2 | tr -d 'v' | head -n 1)
+    fi
+  fi
+  [ -z "$version" ] && version=$(wget -T 60 -O- "https://sbom.k8s.io/$(curl -Ls https://dl.k8s.io/release/stable.txt)/release" 2>&1 | grep "SPDXID: SPDXRef-Package-registry.k8s.io" | grep -v sha256 | cut -d- -f3- | sed 's/-/\//' | sed 's/-v1/:v1/' | grep 'kubectl-amd64:v1.29.3' | cut -dv -f2)
+  echo "$version"
 }
 
 function init_install_process() {

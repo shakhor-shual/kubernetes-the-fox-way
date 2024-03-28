@@ -123,6 +123,11 @@ write_files:
     content: |
      ${extra_sans}
 #====================
+ -  path: /usr/local/etc/kubernetes.release
+    permissions: "0644"
+    content: |
+     ${kubernetes_release}
+#====================
  -  path: /home/${user}/.ssh/id_rsa
     permissions: "0600"
     encoding: gzip

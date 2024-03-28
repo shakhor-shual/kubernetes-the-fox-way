@@ -36,6 +36,11 @@ variable "kube_kind" {
   default     = "k8raw"
 }
 
+variable "kubernetes_release" {
+  description = "Kube release for k8raw deployment !!!IF EMPTY/WRONG -used last stable, IF major&minor -> used specefied OR minor-latest(for wrong/skipped minors)"
+  default     = "1.29.1"
+}
+
 variable "ingress_host" {
   description = "Hostnames for ingress hosts"
   default     = "node-ingress"
@@ -90,3 +95,22 @@ variable "nfs_pv_size" {
   description = "Size of NFS PV-volumes storage: !!!ALL SIZEs >=1024 AUTO ALLOCATTED to GCP Filestore Service"
   default     = 25
 }
+
+
+
+#supported DDNS provider - Duck-DDNS
+variable "ddns_domain_ingress" {
+  description = "DUCK DDNS domain for ingress LB IP (nginx-based ingress) "
+  default     = "my-ingress-lb-ddns-name"
+}
+
+variable "ddns_domain_bastion" {
+  description = "DDNS domain (actually DDNS short-host-name) for bastion IP (traefik-based ingress)"
+  default     = "my-bastion-ddns-name"
+}
+
+variable "ddns_access_token" {
+  description = "Duck-DDNS access touken for domains refresh"
+  default     = "TAKE-IT-FROM-DACK-DDNS-PROVIDER-ID-IT_USED"
+}
+
