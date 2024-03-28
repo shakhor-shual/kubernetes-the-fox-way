@@ -108,7 +108,7 @@ variable "ddns_domain_bastion" {
 }
 
 variable "ddns_access_token" {
-  description = "Duck-DDNS access touken for domains refresh"
-  default     = "TAKE-IT-FROM-DUCK-DDNS-PROVIDER-IF-THIS-USED"
+  description = "Duck-DDNS access touken for domains refresh, take it from Duck-DNS provider"
+  default     = ""
 }
 

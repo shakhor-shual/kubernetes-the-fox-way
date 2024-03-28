@@ -22,7 +22,6 @@ ETC_usr=/usr/local/etc
   [ ! -f "$ETC_usr/ingress.nodes.prefix" ] && exit 1
 
 # components versions for install
-KUBE_v=$(check_kube_release "$(head <"$ETC_usr"/kubernetes.release -n 1)")
 ETCD_v="3.5.12"
 CONTAINERD_v="1.7.14"
 RUNC_v="1.1.12"
@@ -32,9 +31,10 @@ CALICO_CNI_v="3.27.2"
 NFS_CSI_v="4.6.0"
 COREDNS_v="1.11.1"
 K9S_v="0.32.4"
+KUBE_v=$(head <"$ETC_usr"/kubernetes.release -n 1)
 
 # kube common settings
-CLUSTER_NAME="kubernetes-blik"
+CLUSTER_NAME="kubernetes-the-fox-way"
 CNI="calico"
 KUBE_HOSTNAMES="kubernetes,kubernetes.default,kubernetes.default.svc,\
 kubernetes.default.svc.cluster,kubernetes.svc.cluster.local"
@@ -79,6 +79,10 @@ function check_kube_release() {
 
 function init_install_process() {
   mkdir -p $INIT_DIR
+
+  KUBE_v=$(check_kube_release "$KUBE_v")
+  echo "$KUBE_v" >$INIT_DIR/USED_KUBERNETES_VERSION
+
   sudo cp -f /etc/hosts "$HOSTS_TMP"
 
   while IFS= read -r instance; do
