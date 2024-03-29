@@ -108,6 +108,7 @@ function init_install_process() {
 function init_bastion_services {
   echo "=======INIT K9S========"
   wget -qO- https://github.com/derailed/k9s/releases/download/v$K9S_v/k9s_Linux_amd64.tar.gz | sudo tar xvz -C /usr/local/bin
+  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
   echo "=======INIT BASTION NFS STORAGES========"
   while IFS= read -r nfs_dir; do
