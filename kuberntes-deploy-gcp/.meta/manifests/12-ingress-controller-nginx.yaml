@@ -5,7 +5,7 @@ metadata:
   labels:
     app.kubernetes.io/instance: ingress-nginx
     app.kubernetes.io/name: ingress-nginx
-  name: ingress-nginx
+  name: ingress
 ---
 apiVersion: v1
 automountServiceAccountToken: true
@@ -18,7 +18,7 @@ metadata:
     app.kubernetes.io/part-of: ingress-nginx
     app.kubernetes.io/version: 1.4.0
   name: ingress-nginx
-  namespace: ingress-nginx
+  namespace: ingress
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -30,7 +30,7 @@ metadata:
     app.kubernetes.io/part-of: ingress-nginx
     app.kubernetes.io/version: 1.4.0
   name: ingress-nginx-admission
-  namespace: ingress-nginx
+  namespace: ingress
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -42,7 +42,7 @@ metadata:
     app.kubernetes.io/part-of: ingress-nginx
     app.kubernetes.io/version: 1.4.0
   name: ingress-nginx
-  namespace: ingress-nginx
+  namespace: ingress
 rules:
 - apiGroups:
   - ""
@@ -147,7 +147,7 @@ metadata:
     app.kubernetes.io/part-of: ingress-nginx
     app.kubernetes.io/version: 1.4.0
   name: ingress-nginx-admission
-  namespace: ingress-nginx
+  namespace: ingress
 rules:
 - apiGroups:
   - ""
@@ -267,7 +267,7 @@ metadata:
     app.kubernetes.io/part-of: ingress-nginx
     app.kubernetes.io/version: 1.4.0
   name: ingress-nginx
-  namespace: ingress-nginx
+  namespace: ingress
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -275,7 +275,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: ingress-nginx
-  namespace: ingress-nginx
+  namespace: ingress
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -287,7 +287,7 @@ metadata:
     app.kubernetes.io/part-of: ingress-nginx
     app.kubernetes.io/version: 1.4.0
   name: ingress-nginx-admission
-  namespace: ingress-nginx
+  namespace: ingress
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -295,7 +295,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: ingress-nginx-admission
-  namespace: ingress-nginx
+  namespace: ingress
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -313,7 +313,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: ingress-nginx
-  namespace: ingress-nginx
+  namespace: ingress
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -332,7 +332,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: ingress-nginx-admission
-  namespace: ingress-nginx
+  namespace: ingress
 ---
 apiVersion: v1
 data:
@@ -350,7 +350,7 @@ metadata:
     app.kubernetes.io/part-of: ingress-nginx
     app.kubernetes.io/version: 1.4.0
   name: ingress-nginx-controller
-  namespace: ingress-nginx
+  namespace: ingress
 ---
 apiVersion: v1
 kind: Service
@@ -362,7 +362,7 @@ metadata:
     app.kubernetes.io/part-of: ingress-nginx
     app.kubernetes.io/version: 1.4.0
   name: ingress-nginx-controller
-  namespace: ingress-nginx
+  namespace: ingress
 spec:
   ipFamilies:
   - IPv4
@@ -397,7 +397,7 @@ metadata:
     app.kubernetes.io/part-of: ingress-nginx
     app.kubernetes.io/version: 1.4.0
   name: ingress-nginx-controller-admission
-  namespace: ingress-nginx
+  namespace: ingress
 spec:
   ports:
   - appProtocol: https
@@ -420,7 +420,7 @@ metadata:
     app.kubernetes.io/part-of: ingress-nginx
     app.kubernetes.io/version: 1.4.0
   name: ingress-nginx-controller
-  namespace: ingress-nginx
+  namespace: ingress
 spec:
   replicas: 2
   minReadySeconds: 0
@@ -536,7 +536,7 @@ metadata:
     app.kubernetes.io/part-of: ingress-nginx
     app.kubernetes.io/version: 1.4.0
   name: ingress-nginx-admission-create
-  namespace: ingress-nginx
+  namespace: ingress
 spec:
   template:
     metadata:
@@ -583,7 +583,7 @@ metadata:
     app.kubernetes.io/part-of: ingress-nginx
     app.kubernetes.io/version: 1.4.0
   name: ingress-nginx-admission-patch
-  namespace: ingress-nginx
+  namespace: ingress
 spec:
   template:
     metadata:
@@ -651,7 +651,7 @@ webhooks:
   clientConfig:
     service:
       name: ingress-nginx-controller-admission
-      namespace: ingress-nginx
+      namespace: ingress
       path: /networking/v1/ingresses
   failurePolicy: Fail
   matchPolicy: Equivalent
