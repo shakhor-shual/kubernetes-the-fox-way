@@ -1,0 +1,2 @@
+#install Argo CD
+https://raw.githubusercontent.com/argoproj/argo-cd/master/manifests/install.yaml

@@ -54,19 +54,21 @@ function init_bastion_services {
 }
 
 function finish_setup {
+   sudo kubectl get nodes
    echo "=======Labeling nodes for INGRESS Controllers ========"
    sudo kubectl label nodes bastion ingress-traefik=enable
    while IFS= read -r instance; do
       echo "==$instance=="
       sudo kubectl label nodes "${instance}" ingress-nginx=enable
-   done < <(grep <"$HOSTS" "$INGRESS_NODE_PREFIX" | awk '{print $2}')
+   done < <(grep <"$HOSTS_TMP" "$INGRESS_NODE_PREFIX" | awk '{print $2}')
 
    echo "=======INTSALL NFS CSI DRIVER ========"
    ssh -n "$SSH_MODE" "$SSH_USER@localhost" "sudo curl -skSL https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/v$NFS_CSI_v/deploy/install-driver.sh | bash -s v$NFS_CSI_v -- | sudo tee -a /var/log/csi_install"
 
    echo "=======APPLY ALL number-started MANIFESTS in next order:========"
-   find $MANS -maxdepth 1 -type f -name '[[:digit:]]*ml' ! -name '*traefik*' -print0 | sort -z | tr '\000' '\n'
-   find $MANS -maxdepth 1 -type f -name '[[:digit:]]*ml' ! -name '*traefik*' -print0 | sort -z | xargs -0 cat | kubectl apply -f -
+   find $MANS -maxdepth 1 -type f -name '[[:digit:]]*ml' -print0 | sort -z | tr '\000' '\n'
+   find $MANS -maxdepth 1 -type f -name '[[:digit:]]*ml' -print0 | sort -z | tr '\000' '\n' | xargs -n1 kubectl apply -f
+   [ -s "$MANS/remote_manifests_list.yaml" ] && sed <"$MANS/remote_manifests_list.yaml" 's/#.*$//;/^$/d' | xargs -n1 kubectl apply -f
    echo "=======CLUSTER BOOTSTRAP OVER========"
    sudo kubectl get nodes
 }

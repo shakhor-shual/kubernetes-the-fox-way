@@ -144,9 +144,10 @@ function finish_setup {
 
   echo "=======APPLY ALL number-started MANIFESTS in next order:========"
   find $MANS -maxdepth 1 -type f -name '[[:digit:]]*ml' -print0 | sort -z | tr '\000' '\n'
-  find $MANS -maxdepth 1 -type f -name '[[:digit:]]*ml' -print0 | sort -z | xargs -0 cat | kubectl apply -f -
+  find $MANS -maxdepth 1 -type f -name '[[:digit:]]*ml' -print0 | sort -z | tr '\000' '\n' | xargs -n1 kubectl apply -f
+  [ -s "$MANS/remote_manifests_list.yaml" ] && sed <"$MANS/remote_manifests_list.yaml" 's/#.*$//;/^$/d' | xargs -n1 kubectl apply -f
   echo "=======CLUSTER BOOTSTRAP OVER========"
-
+  sudo kubectl get nodes
 }
 
 function gencert_CA {
